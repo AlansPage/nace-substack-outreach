@@ -4,8 +4,39 @@ import json
 import sqlite3
 from pathlib import Path
 
+from urllib.parse import urlsplit
+
 from .common import canonical, classify, digest, dumps, is_profile, now, publication_url
 from .workbook import EXPECTED, identifier, read_workbook
+
+DNC_MATCHERS = ("hosts", "author_names", "names", "pub_ids")
+
+
+def load_dnc(path):
+    """Do-not-contact seed list: exact matches only, each entry with an owner, reason and source."""
+    data = json.loads(Path(path).read_text(encoding="utf-8-sig"))
+    entries = data.get("entries") if isinstance(data, dict) else None
+    if not isinstance(entries, list):
+        raise ValueError(f"{path}: expected an object with an 'entries' list")
+    for n, e in enumerate(entries):
+        if not all(isinstance(e.get(k), str) and e[k].strip() for k in ("owner", "reason", "source")):
+            raise ValueError(f"{path}: entry {n} needs owner, reason and source")
+        if not any(e.get(k) for k in DNC_MATCHERS):
+            raise ValueError(f"{path}: entry {n} needs at least one of {', '.join(DNC_MATCHERS)}")
+    return entries
+
+
+def dnc_match(entries, data):
+    host = (urlsplit(data.get("publication_url") or "").hostname or "").removeprefix("www.")
+    source = data.get("source") or {}
+    values = {"hosts": host, "author_names": str(data.get("author_name") or "").strip().casefold(),
+              "names": str(data.get("publication") or "").strip().casefold(), "pub_ids": identifier(source.get("pub_id"))}
+    for e in entries:
+        for key in DNC_MATCHERS:
+            wanted = {identifier(v) if key == "pub_ids" else str(v).strip().casefold().removeprefix("www.") for v in e.get(key) or []}
+            if values[key] and values[key] in wanted:
+                return e, key
+    return None, None
 
 
 class Store:
@@ -163,6 +194,23 @@ class Store:
             self.db.execute("INSERT INTO imports VALUES(?,?,?,?)", (fingerprint, str(path), dumps(headers), now()))
         return {"rows": len(rows), "inserted": inserted, "duplicates": duplicates, "headers": headers,
                 "missing_headers": sorted(EXPECTED - set(headers))}
+
+    def apply_dnc(self, entries, list_name):
+        # Re-run on every import so a resumed workbook still picks up a newly added entry.
+        suppressed = []
+        with self.db:
+            for row in self.db.execute("SELECT id,data,status FROM publications").fetchall():
+                if row["status"] == "Do not contact":
+                    continue
+                entry, key = dnc_match(entries, json.loads(row["data"]) | {"id": row["id"]})
+                if entry is None:
+                    continue
+                pub = self.get(row["id"])
+                if self.suppressed(pub):
+                    continue
+                self.suppress(pub, f"DNC list ({list_name}): {entry['owner']} - {entry['reason']} [matched {key}; source: {entry['source']}]")
+                suppressed.append({"id": pub["id"], "publication": pub["publication"], "owner": entry["owner"], "matched": key})
+        return suppressed
 
     def shortlist(self, limit=100, batch=20):
         # A persisted pilot is resumable. Increasing the batch extends it; it never rotates silently.

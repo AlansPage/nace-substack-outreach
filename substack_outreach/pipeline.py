@@ -3,11 +3,14 @@ from __future__ import annotations
 import csv
 import io
 import json
+from pathlib import Path
+
 from .common import FITS, digest, dumps, html_email, now, publication_url, safe_url
+from .config import ROOT
 from .evidence import evidence_checks, prepare_evidence, registry, validate
 from .models import MockWriter, OpenAIWriter, writing_input
 from .sources import Collector, Run, save_articles
-from .store import Store
+from .store import Store, load_dnc
 from .workbook import find_workbook
 
 
@@ -54,9 +57,22 @@ class Pipeline:
             items.append({k: p.get(k) for k in ("id", "publication", "author_name", "status", "fit_category", "fit_reasons", "owner", "score", "publication_url", "profile_url", "author_publications", "do_not_contact", "source_kind")})
         return {"items": items, "total": total, "offset": offset}
 
-    def pilot(self, input_path=None, batch=None, shortlist=None):
+    def dnc_list(self):
+        path = Path(self.config["dnc_path"])
+        if not path.is_file():
+            path = ROOT / "substack_outreach/dnc.example.json"
+        return load_dnc(path), path.name
+
+    def import_workbook(self, input_path=None, batch=None, shortlist=None):
         result = self.store.import_workbook(find_workbook(input_path or self.config.get("input_path")))
+        entries, name = self.dnc_list()
+        result["dnc_list"] = name
+        result["dnc_suppressed"] = self.store.apply_dnc(entries, name)
         result.update(self.store.shortlist(shortlist or self.config["shortlist_size"], batch or self.config["batch_size"]))
+        return result
+
+    def pilot(self, input_path=None, batch=None, shortlist=None):
+        result = self.import_workbook(input_path, batch, shortlist)
         result["processing"] = self.process(batch or self.config["batch_size"])
         return result
 
@@ -106,6 +122,78 @@ class Pipeline:
             raise
         return results
 
+    def collect_contacts(self, batch=None, retry_failed=False):
+        if not self.config.get("collect_contacts"):
+            raise ValueError("CONTACT_COLLECTION_DISABLED: set collect_contacts: true in the local config")
+        if not self.config["network_enabled"]:
+            raise ValueError("NETWORK_DISABLED: enable network access to read publication about pages")
+        run = Run(self.store, self.config, "contacts")
+        collector = Collector(self.store, self.config, run)
+        results = []
+        try:
+            rows = self.store.db.execute("SELECT id,data FROM publications WHERE pilot=1 AND status NOT IN ('Skipped','Do not contact','Sent','Replied') ORDER BY score DESC,id").fetchall()
+            for row in rows:
+                if len(results) >= (batch or self.config["batch_size"]):
+                    break
+                data = json.loads(row["data"])
+                previous = (data.get("contact_route_proposed") or {}).get("status")
+                if not publication_url(data.get("publication_url")) or data.get("contact_confirmed") or (previous and not (retry_failed and previous == "failed")):
+                    continue
+                pub = self.store.get(row["id"])
+                try:
+                    about, candidates = collector.about_contacts(pub)
+                except ValueError as exc:
+                    if str(exc).startswith("Per-run"):
+                        results.append({"id": pub["id"], "publication": pub["publication"], "error": str(exc)})
+                        break
+                    # Robots refusals, HTTP barriers and oversize pages are remembered; --retry-failed tries again.
+                    pub["contact_route_proposed"] = {"route": "", "candidates": [], "contact_source_url": pub["publication_url"] + "/about",
+                                                     "contact_confirmed": False, "status": "failed", "error": str(exc), "collected_at": now()}
+                    with self.store.db:
+                        self.store.save(pub)
+                        self.store.event(pub["id"], "contact_collection_failed", str(exc))
+                    results.append({"id": pub["id"], "publication": pub["publication"], "error": str(exc)})
+                    continue
+                # A proposal only. contact_route is written solely by a human confirming it in the UI.
+                pub["contact_route_proposed"] = {"route": candidates[0]["route"] if candidates else "", "candidates": candidates,
+                                                 "contact_source_url": about, "contact_confirmed": False,
+                                                 "status": "proposed" if candidates else "none_found", "collected_at": now()}
+                with self.store.db:
+                    self.store.save(pub)
+                    self.store.event(pub["id"], "contact_proposed", {"source": about, "candidates": len(candidates)})
+                results.append({"id": pub["id"], "publication": pub["publication"], "source": about,
+                                "result": pub["contact_route_proposed"]["status"], "candidates": candidates})
+            run.finish()
+        except Exception:
+            run.finish("Run interrupted; committed work is resumable")
+            raise
+        return results
+
+    def resolve_contact_proposal(self, pid, data):
+        pub = self.store.get(pid)
+        proposal = pub.get("contact_route_proposed") or {}
+        if proposal.get("status") != "proposed":
+            raise ValueError("No unresolved contact proposal for this publication")
+        if not str(data.get("reviewer") or "").strip():
+            raise ValueError("A named reviewer is required to resolve a contact proposal")
+        decision = data.get("decision")
+        if decision == "confirm":
+            route = data.get("route") or proposal["route"]
+            if route not in [c["route"] for c in proposal["candidates"]]:
+                raise ValueError("Confirm one of the proposed routes; enter any other route manually with its own source")
+            # Reuse the ordinary recipient validation; the about page is the provenance.
+            self.update(pid, {"contact_route": route, "contact_source_url": proposal["contact_source_url"],
+                              "contact_kind": data.get("contact_kind") or "contact", "contact_confirmed": True})
+            pub = self.store.get(pid)
+        elif decision != "dismiss":
+            raise ValueError("decision must be confirm or dismiss")
+        pub["contact_route_proposed"] = dict(proposal, status="confirmed" if decision == "confirm" else "dismissed",
+                                             contact_confirmed=decision == "confirm", decided_by=data["reviewer"].strip(), decided_at=now())
+        with self.store.db:
+            self.store.save(pub)
+            self.store.event(pid, "contact_proposal_" + ("confirmed" if decision == "confirm" else "dismissed"), {"reviewer": data["reviewer"].strip()})
+        return self.detail(pid)
+
     def save_draft(self, pub, draft, facts, h):
         draft["html_body"] = html_email(draft["plain_text_body"])
         draft["registry_hash"] = h
@@ -142,7 +230,7 @@ class Pipeline:
         own_run = run is None
         run = run or Run(self.store, self.config, "regenerate" if regenerate else "generate")
         try:
-            writer = MockWriter() if self.config["provider"] == "mock" else OpenAIWriter(self.store, self.config, run)
+            writer = MockWriter(facts) if self.config["provider"] == "mock" else OpenAIWriter(self.store, self.config, run)
             payload = writing_input(pub, evidence, facts, self.config["sender"])
             if writer.name != "mock" and not evidence.get("evidence_reviewed_by"):
                 raise ValueError("Review the evidence-backed angle before live writing")
@@ -236,6 +324,8 @@ class Pipeline:
             return self.detail(pid)
         if action == "evidence":
             return self.update(pid, {"evidence": data})
+        if action == "contact_proposal":
+            return self.resolve_contact_proposal(pid, data)
         pub = self.detail(pid)
         with self.store.db:
             if action in ("approve", "review"):

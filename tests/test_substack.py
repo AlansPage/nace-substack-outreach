@@ -14,8 +14,11 @@ from substack_outreach.evidence import ASKS, BASE_CLAIMS, evidence_checks, prepa
 from substack_outreach.fixtures import add_fixture, previews
 from substack_outreach.models import MockWriter, OpenAIWriter, writing_input
 from substack_outreach.pipeline import Pipeline, csv_safe
-from substack_outreach.sources import Collector, Run, parse_feed, public_https, save_articles
+from substack_outreach.sources import Collector, Run, extract_contacts, parse_feed, public_https, save_articles
+from substack_outreach.store import load_dnc
 from substack_outreach.workbook import identifier, read_workbook
+
+FIXTURES = Path(__file__).resolve().parent / 'fixtures'
 
 
 def workbook(path, rows):
@@ -119,6 +122,97 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(classify({'name': 'Unknown', 'categories': 'Technology', 'free_subscribers': '10000000', 'first_post_date': now()})[0], FITS[4])
         self.assertEqual(classify({'hero_text': 'AI agents, LLM, inference and model evaluation'})[0], FITS[0])
         self.assertEqual(classify({'hero_text': 'Writing on digital minimalism and human agency'})[0], FITS[2])
+
+    def test_classifier_recall_fixture(self):
+        for case in json.loads((FIXTURES / 'classifier_rows.json').read_text(encoding='utf-8')):
+            fit, score, reasons = classify(case['row'])
+            self.assertEqual(fit, case['fit'], case['row']['name'])
+            signals = reasons[0].removeprefix('Local metadata signals: ').split(', ') if reasons[0].startswith('Local') else []
+            self.assertEqual(signals, case['signals'], case['row']['name'])
+
+    def test_technology_category_weight_ranks_but_is_not_fit_evidence(self):
+        row = {'hero_text': 'Weekly notes on how AI changes everyday office work'}
+        plain, tech = classify(row), classify(dict(row, categories='Technology; Podcasts'))
+        self.assertEqual(plain[0], tech[0])
+        self.assertEqual(tech[1], plain[1] + 5)
+        self.assertIn('Category weight +5: Technology; Podcasts', tech[2])
+        unrelated = classify({'hero_text': 'HTML and CSS layout tricks for hand-written pages', 'categories': 'Technology'})
+        self.assertEqual((unrelated[0], unrelated[1]), (FITS[3], 0))
+
+    def test_dnc_list_suppresses_vendor_publications_at_import(self):
+        self.config['dnc_path'] = str(FIXTURES / 'dnc.json')
+        path = self.path / 'input.xlsx'
+        workbook(path, [['pub_id', 'author_id', 'url', 'name', 'author_name', 'hero_text', 'categories'],
+            ['1', '10', 'https://www.vendorco-news.substack.com/', 'Vendor news', 'Press team', 'AI agents and LLM product updates', 'Technology'],
+            ['2', '11', 'https://ops.example', 'Ops', 'VendorCo Official', 'AI automation for operations teams', 'Technology'],
+            ['77', '12', 'https://lab.example', 'Lab', 'Lab desk', 'Deep learning research notes and ML', 'Technology'],
+            ['3', '13', 'https://employee.example', 'Personal', 'VendorCo Official fan', 'AI agents, written by an employee, not official', 'Technology']])
+        result = self.p.import_workbook(str(path), 20, 100)
+        self.assertEqual(result['dnc_list'], 'dnc.json')
+        self.assertEqual(sorted(r['matched'] for r in result['dnc_suppressed']), ['author_names', 'hosts', 'pub_ids'])
+        statuses = {self.p.store.get(i)['publication']: self.p.store.get(i)['status'] for i in (1, 2, 3, 4)}
+        self.assertEqual(statuses, {'Vendor news': 'Do not contact', 'Ops': 'Do not contact', 'Lab': 'Do not contact', 'Personal': 'Shortlisted'})
+        self.assertEqual(result['shortlisted'], 1)
+        reason = self.p.store.db.execute("SELECT reason FROM suppressions WHERE key='author:10'").fetchone()[0]
+        self.assertIn('VendorCo', reason)
+        self.assertIn('source: Test fixture', reason)
+        again = self.p.import_workbook(str(path), 20, 100)
+        self.assertTrue(again['resumed'])
+        self.assertEqual(again['dnc_suppressed'], [])
+
+    def test_dnc_falls_back_to_seed_and_rejects_entries_without_source(self):
+        self.config['dnc_path'] = str(self.path / 'missing.json')
+        entries, name = self.p.dnc_list()
+        self.assertEqual(name, 'dnc.example.json')
+        self.assertTrue(all(e['source'] for e in entries))
+        bad = self.path / 'bad.json'
+        bad.write_text(dumps({'entries': [{'owner': 'X', 'reason': 'Vendor', 'hosts': ['x.example']}]}), encoding='utf-8')
+        with self.assertRaisesRegex(ValueError, 'owner, reason and source'):
+            load_dnc(bad)
+
+    def use_phrases(self):
+        phrases = json.loads((FIXTURES / 'registry_phrases.json').read_text(encoding='utf-8'))
+        for e in self.facts['entries']:
+            if e['id'] in phrases:
+                e['email_phrase'] = phrases[e['id']]
+        (self.path / 'facts.json').write_text(dumps(self.facts), encoding='utf-8')
+        return phrases
+
+    def test_mock_wording_comes_from_registry_phrases(self):
+        phrases = self.use_phrases()
+        pid, p = self.ready()
+        body = p['draft']['plain_text_body']
+        self.assertIn("I'm Your Name from Nace AI, working on " + phrases['product.model'] + ', ' + phrases['product.agents'] + '.', body)
+        self.assertIn('We can offer fixture evaluation credits and answer fixture questions.', body)
+        self.assertNotIn('Drex Max', body + p['draft']['subject'])
+        self.assertNotIn('screenshot', body)
+        self.assertFalse([f for f in p['draft']['review_flags'] if f.startswith('CLAIM_SCOPE_OR_TEXT_CHANGED')])
+
+    def test_mock_previews_pending_phrase_but_never_unselected_or_rejected(self):
+        phrases = self.use_phrases()
+        self.facts['entries'][[e['id'] for e in self.facts['entries']].index('product.agents')]['approval_status'] = 'rejected'
+        (self.path / 'facts.json').write_text(dumps(self.facts), encoding='utf-8')
+        pid = self.pub(); self.research(pid)
+        e = self.p.store.get(pid)['evidence']; e['selected_claim_ids'] = [c for c in e['selected_claim_ids'] if c != 'offer.questions']
+        self.p.update(pid, {'evidence': e})
+        d = self.p.generate(pid)['draft']
+        self.assertIn(phrases['product.model'], d['plain_text_body'])
+        self.assertIn('CLAIM_NOT_APPROVED:product.model', d['review_flags'])
+        for cid in ('product.agents', 'offer.questions'):
+            self.assertNotIn(phrases[cid], d['plain_text_body'])
+            self.assertNotIn(cid, d['claim_ids_used'])
+        self.assertIn('PRODUCT_USE_CASE_SUPPORT_OR_LINK_MISSING', d['review_flags'])
+
+    def test_no_product_name_or_capability_hard_coded(self):
+        from substack_outreach.models import INSTRUCTIONS
+        reference = INSTRUCTIONS[INSTRUCTIONS.index('STRUCTURAL EXAMPLE ONLY'):]
+        self.assertIn('[APPROVED PRODUCT MODEL PHRASE]', reference)
+        self.assertNotIn('release', reference)
+        for path in (ROOT / 'substack_outreach').glob('*.*'):
+            if path.suffix in ('.py', '.txt', '.js') :
+                text = path.read_text(encoding='utf-8')
+                for term in ('Drex Max', 'screenshots', 'browser-use agents', 'multimodal decision model'):
+                    self.assertNotIn(term, text, f'{path.name} hard-codes {term!r}')
 
     def test_pending_claims_and_mock_cannot_approve(self):
         pid = self.pub(); self.research(pid)
@@ -285,6 +379,141 @@ class PipelineTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'SOURCE_PERMISSION_REQUIRED'):
                 Collector(self.p.store, self.config, run).collect(self.p.store.get(pid))
             fetch.assert_not_called()
+
+    def default_permission_pub(self, pub_id='555', research=None):
+        pid = self.pub()
+        pub = self.p.store.get(pid)
+        pub['source'] = {'pub_id': pub_id} if pub_id else {}
+        pub['research'] = research or {}
+        self.p.store.save(pub); self.p.store.db.commit()
+        self.config['network_enabled'] = True
+        self.config['default_feed_permission'] = json.loads((FIXTURES / 'default_feed_permission.json').read_text(encoding='utf-8'))
+        return pid
+
+    def test_default_feed_permission_collects_custom_domain(self):
+        pid = self.default_permission_pub()
+        pages = {'https://testing.example': (FIXTURES / 'custom_domain_home.html').read_bytes(),
+                 'https://testing.example/feed': (FIXTURES / 'custom_domain_feed.xml').read_bytes()}
+        collector = Collector(self.p.store, self.config, Run(self.p.store, self.config, 'test'))
+        with patch.object(collector, 'allowed_get', side_effect=lambda url, host: pages[url]) as fetch:
+            rows = collector.collect(self.p.store.get(pid))
+        self.assertEqual([c.args for c in fetch.call_args_list], [('https://testing.example', 'testing.example'), ('https://testing.example/feed', 'testing.example')])
+        self.assertEqual(rows[0]['url'], 'https://testing.example/p/scoring')
+        self.assertTrue(rows[0]['membership_confirmed'])
+        self.assertEqual(rows[0]['permission_source_url'], 'https://policy.example/substack-research')
+        self.assertIn('team policy', rows[0]['permission_basis'])
+
+    def test_default_feed_permission_never_overrides_or_widens(self):
+        collector = lambda: Collector(self.p.store, self.config, Run(self.p.store, self.config, 'test'))
+        # Explicit research block wins, even when incomplete.
+        pid = self.default_permission_pub(research={'source_kind': 'publisher_rss', 'permission_basis': 'Explicit but not permitted'})
+        with self.assertRaisesRegex(ValueError, 'SOURCE_PERMISSION_REQUIRED'):
+            collector().permission(self.p.store.get(pid))
+        # Not a workbook Substack row: no pub_id.
+        pid = self.default_permission_pub(pub_id=None)
+        with self.assertRaisesRegex(ValueError, 'SOURCE_PERMISSION_REQUIRED'):
+            collector().permission(self.p.store.get(pid))
+        # Unresolved publication URL.
+        pid = self.default_permission_pub()
+        self.p.store.db.execute("UPDATE publications SET data=json_set(data,'$.publication_url','') WHERE id=?", (pid,))
+        with self.assertRaisesRegex(ValueError, 'SOURCE_PERMISSION_REQUIRED'):
+            collector().permission(self.p.store.get(pid))
+        # Expired review date and the default null value.
+        pid = self.default_permission_pub()
+        self.config['default_feed_permission']['permission_review_date'] = '2000-01-01'
+        with self.assertRaisesRegex(ValueError, 'SOURCE_PERMISSION_REVIEW_REQUIRED'):
+            collector().permission(self.p.store.get(pid))
+        self.config['default_feed_permission'] = None
+        with self.assertRaisesRegex(ValueError, 'SOURCE_PERMISSION_REQUIRED'):
+            collector().permission(self.p.store.get(pid))
+
+    def test_default_feed_permission_config_shape(self):
+        good = json.loads((FIXTURES / 'default_feed_permission.json').read_text(encoding='utf-8'))
+        self.assertIsNone(load_config()['default_feed_permission'])
+        for bad in ({}, dict(good, feed_url='https://x.example/feed'), dict(good, permission_source_url='http://policy.example'),
+                    dict(good, permission_review_date='soon'), dict(good, permission_basis='ok'), 'yes'):
+            path = self.path / 'cfg.json'
+            path.write_text(dumps({'default_feed_permission': bad}), encoding='utf-8')
+            with self.assertRaisesRegex(ValueError, 'default_feed_permission'):
+                load_config(path)
+        path.write_text(dumps({'default_feed_permission': good}), encoding='utf-8')
+        self.assertEqual(load_config(path)['default_feed_permission'], good)
+
+    ABOUT = [{'route': 'Editor@Testing.example', 'type': 'email', 'found_as': 'mailto link'},
+             {'route': 'partners@testing.example', 'type': 'email', 'found_as': 'visible text'},
+             {'route': 'https://x.com/samexample', 'type': 'x', 'found_as': 'link'},
+             {'route': 'https://linkedin.com/in/sam-example', 'type': 'linkedin', 'found_as': 'link'},
+             {'route': 'https://samexample.dev', 'type': 'site', 'found_as': 'link'}]
+
+    def test_about_page_contact_extraction(self):
+        page = (FIXTURES / 'about_page.html').read_text(encoding='utf-8')
+        self.assertEqual(extract_contacts(page, 'https://testing.example/about'), self.ABOUT)
+
+    def contact_pub(self):
+        pid = self.pub()
+        self.p.update(pid, {'contact_route': '', 'contact_source_url': '', 'contact_kind': '', 'contact_confirmed': False})
+        self.config.update(collect_contacts=True, network_enabled=True)
+        return pid
+
+    def test_collect_contacts_stores_unconfirmed_proposal_that_blocks_approval(self):
+        pid = self.contact_pub()
+        page = (FIXTURES / 'about_page.html').read_bytes()
+        with patch.object(Collector, 'allowed_get', return_value=page) as fetch:
+            results = self.p.collect_contacts(5)
+            self.assertEqual(fetch.call_args.args, ('https://testing.example/about', 'testing.example'))
+            self.assertEqual(self.p.collect_contacts(5), [])  # resumable: no second fetch
+            self.assertEqual(fetch.call_count, 1)
+        self.assertEqual(results[0]['result'], 'proposed')
+        pub = self.p.store.get(pid)
+        proposal = pub['contact_route_proposed']
+        self.assertEqual((proposal['route'], proposal['contact_source_url'], proposal['contact_confirmed']),
+                         ('Editor@Testing.example', 'https://testing.example/about', False))
+        self.assertEqual(proposal['candidates'], self.ABOUT)
+        self.assertEqual((pub['contact_route'], pub['contact_confirmed']), ('', False))
+        self.research(pid)
+        draft = self.p.generate(pid)['draft']
+        self.assertIn('CONTACT_PROPOSED_UNCONFIRMED', draft['validation']['blocking_flags'])
+        with self.assertRaisesRegex(ValueError, 'CONTACT_PROPOSED_UNCONFIRMED'):
+            self.p.action(pid, 'approve', {'reviewer': 'X', 'semantic_review_confirmed': True})
+        with self.assertRaisesRegex(ValueError, 'named reviewer'):
+            self.p.action(pid, 'contact_proposal', {'decision': 'confirm'})
+        with self.assertRaisesRegex(ValueError, 'one of the proposed routes'):
+            self.p.action(pid, 'contact_proposal', {'decision': 'confirm', 'route': 'other@else.example', 'reviewer': 'Human'})
+        p = self.p.action(pid, 'contact_proposal', {'decision': 'confirm', 'route': 'partners@testing.example', 'contact_kind': 'business', 'reviewer': 'Human'})
+        self.assertEqual((p['contact_route'], p['contact_source_url'], p['contact_kind'], p['contact_confirmed']),
+                         ('partners@testing.example', 'https://testing.example/about', 'business', True))
+        self.assertEqual((p['contact_route_proposed']['status'], p['contact_route_proposed']['decided_by']), ('confirmed', 'Human'))
+        self.assertNotIn('CONTACT_PROPOSED_UNCONFIRMED', p['draft']['review_flags'])
+
+    def test_contact_proposal_dismiss_and_gates(self):
+        pid = self.contact_pub()
+        self.config['collect_contacts'] = False
+        with patch.object(Collector, 'allowed_get') as fetch:
+            with self.assertRaisesRegex(ValueError, 'CONTACT_COLLECTION_DISABLED'):
+                self.p.collect_contacts()
+            self.config.update(collect_contacts=True, network_enabled=False)
+            with self.assertRaisesRegex(ValueError, 'NETWORK_DISABLED'):
+                self.p.collect_contacts()
+            fetch.assert_not_called()
+        self.config['network_enabled'] = True
+        with patch.object(Collector, 'allowed_get', return_value=(FIXTURES / 'about_page.html').read_bytes()):
+            self.p.collect_contacts()
+        p = self.p.action(pid, 'contact_proposal', {'decision': 'dismiss', 'reviewer': 'Human'})
+        self.assertEqual((p['contact_route'], p['contact_route_proposed']['status']), ('', 'dismissed'))
+        with self.assertRaisesRegex(ValueError, 'No unresolved'):
+            self.p.action(pid, 'contact_proposal', {'decision': 'confirm', 'reviewer': 'Human'})
+
+    def test_contact_collection_obeys_robots_and_retries_failed_only_on_request(self):
+        pid = self.contact_pub()
+        def get(collector, url, host, use_cache=True):
+            return b'User-agent: *\nDisallow: /about\n' if url.endswith('/robots.txt') else self.fail('about page fetched despite robots')
+        with patch.object(Collector, 'get', get):
+            self.assertIn('ROBOTS_DISALLOWED', self.p.collect_contacts()[0]['error'])
+        self.assertEqual(self.p.store.get(pid)['contact_route_proposed']['status'], 'failed')
+        self.assertEqual(self.p.collect_contacts(), [])
+        with patch.object(Collector, 'allowed_get', return_value=b'<p>No contact here.</p>'):
+            self.assertEqual(self.p.collect_contacts(retry_failed=True)[0]['result'], 'none_found')
+        self.assertNotIn('CONTACT_PROPOSED_UNCONFIRMED', str(self.p.store.get(pid)))
 
     def test_rss_and_atom_parsing_and_incomplete_content(self):
         rss = b'<rss xmlns:content="http://purl.org/rss/1.0/modules/content/"><channel><item><title>Old</title><link>https://x.example/old</link><pubDate>Tue, 01 Sep 2026 12:00:00 GMT</pubDate><description>Old excerpt</description></item><item><title>New</title><link>https://x.example/new</link><pubDate>Thu, 01 Oct 2026 12:00:00 GMT</pubDate><content:encoded>&lt;p&gt;Available text&lt;/p&gt;</content:encoded></item></channel></rss>'

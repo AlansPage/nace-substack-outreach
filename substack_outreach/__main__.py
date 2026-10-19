@@ -21,6 +21,9 @@ def main():
     p = subs.add_parser("process")
     p.add_argument("--batch", type=int)
     p.add_argument("--collect", action="store_true", help="Collect only permission-approved publisher feeds")
+    p = subs.add_parser("collect-contacts", help="Propose contact routes from pilot publications' about pages")
+    p.add_argument("--batch", type=int)
+    p.add_argument("--retry-failed", action="store_true", help="Try about pages that failed before")
     p = subs.add_parser("research-import")
     p.add_argument("file", help="JSON object {publication_id, articles: [...]} or list of those objects")
     p = subs.add_parser("contact-import")
@@ -68,11 +71,11 @@ def main():
         if args.command == "pilot":
             result = pipeline.pilot(args.input, args.batch, args.shortlist)
         elif args.command == "import":
-            from .workbook import find_workbook
-            result = pipeline.store.import_workbook(find_workbook(args.input or config.get("input_path")))
-            result.update(pipeline.store.shortlist(args.shortlist or config["shortlist_size"], args.batch or config["batch_size"]))
+            result = pipeline.import_workbook(args.input, args.batch, args.shortlist)
         elif args.command == "process":
             result = pipeline.process(args.batch, args.collect)
+        elif args.command == "collect-contacts":
+            result = pipeline.collect_contacts(args.batch, args.retry_failed)
         elif args.command == "generate":
             result = pipeline.generate(args.id, args.regenerate)
         elif args.command == "show":

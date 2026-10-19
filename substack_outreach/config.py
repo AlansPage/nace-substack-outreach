@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+from .sources import check_default_permission
+
 ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -15,13 +17,16 @@ def load_config(path=None):
         raise ValueError("max_articles must be 1..5; max_retries must be 0..3")
     if config["provider"] not in ("mock", "openai"):
         raise ValueError("Supported writing adapters: mock, openai")
-    for key in ('database', 'registry_path'):
+    for key in ('database', 'registry_path', 'dnc_path'):
         target = Path(config[key]).resolve()
         public = (ROOT / 'public').resolve()
         if target == public or public in target.parents:
             raise ValueError(f'{key} cannot be inside public static assets')
     if config['budget_usd_per_run'] < 0 or config['cache_hours'] < 0 or config['request_interval_seconds'] < 0:
         raise ValueError('Budget, cache lifetime and request interval cannot be negative')
+    check_default_permission(config.get('default_feed_permission'))
+    if not isinstance(config.get('collect_contacts'), bool):
+        raise ValueError('collect_contacts must be true or false')
     sender = config.get('sender', {})
     if not sender.get('name') or not sender.get('email') or sender.get('company') != 'Nace AI':
         raise ValueError('Configure the complete sender name, Nace AI company and actual email together')

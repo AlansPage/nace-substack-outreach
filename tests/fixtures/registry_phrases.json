@@ -1,0 +1,6 @@
+{
+  "product.model": "Fixturemodel, a scoring model that answers typed questions",
+  "product.agents": "for ticket triage in support queues",
+  "offer.credits": "fixture evaluation credits",
+  "offer.questions": "answer fixture questions"
+}

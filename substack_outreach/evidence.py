@@ -7,9 +7,9 @@ from pathlib import Path
 
 from .common import FITS, TECH, canonical, digest, dumps, matches, norm, now, safe_url
 
-ASKS = {"review": "Would you be open to evaluating Drex Max for a possible review?",
+ASKS = {"review": "Would you be open to evaluating our model for a possible review?",
         "technical walkthrough": "Would a technical walkthrough of this use case be useful for your publication?",
-        "roundup inclusion": "Would you consider evaluating Drex Max for inclusion in a relevant roundup?",
+        "roundup inclusion": "Would you consider evaluating our model for inclusion in a relevant roundup?",
         "exploratory discussion": "Would you be open to an exploratory discussion about which digital decisions people would choose to delegate?"}
 BASE_CLAIMS = ["product.model", "product.agents", "offer.credits", "offer.questions", "link.developers"]
 
@@ -202,6 +202,8 @@ def validate(store, pub, draft, facts, facts_hash):
         flags.append("CONTACT_UNVERIFIED")
     if pub.get("contact_kind") not in ("business", "contact", "submission", "user_supplied"):
         flags.append("EDITORIAL_CONTACT_ROUTE_REQUIRED")
+    if (pub.get("contact_route_proposed") or {}).get("status") == "proposed":
+        flags.append("CONTACT_PROPOSED_UNCONFIRMED")
     if store.suppressed(pub):
         flags.append("DO_NOT_CONTACT")
     if store.history(pub):

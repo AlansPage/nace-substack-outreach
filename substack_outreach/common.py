@@ -15,8 +15,13 @@ TECH = ["AI engineering", "AI agents", "agentic workflows", "machine learning", 
         "small language models", "inference", "model evaluation", "classification",
         "intent detection", "routing", "tool selection", "structured outputs", "computer use",
         "browser agents", "multimodal models", "n8n", "workflow automation",
-        "document processing", "OCR", "RAG", "developer tools"]
-APPLICATION = ["artificial intelligence", "generative AI", "automation", "AI applications", "AI tools"]
+        "document processing", "OCR", "RAG", "developer tools",
+        "ML", "deep learning", "agents", "data science"]
+APPLICATION = ["artificial intelligence", "generative AI", "automation", "AI applications", "AI tools",
+               "AI", "A.I.", "GPT", "ChatGPT"]
+# Short acronyms are ordinary words in lower case ("ai" in French/Italian, "ml" for millilitres).
+CASED = {"AI", "A.I.", "ML", "GPT"}
+CATEGORY_WEIGHT = {"technology": 5}
 EDITORIAL = ["digital life", "digital habits", "attention economy", "philosophy of technology",
              "digital culture", "human agency", "digital minimalism"]
 
@@ -68,12 +73,29 @@ def publication_url(value):
 
 
 def matches(text, terms):
-    return [t for t in terms if re.search(r"(?<!\w)" + re.escape(t).replace(r"\ ", r"[ -]") + r"s?(?!\w)", text, re.I)]
+    # Longest terms first; a shorter term inside an earlier match ("agents" in "AI agents") is not a second signal.
+    text, found = str(text), set()
+    for t in sorted(terms, key=len, reverse=True):
+        body = re.escape(t).replace(r"\ ", r"[ -]") + "s?"
+        if t in CASED:
+            # ASCII edges so "AIとWeb3" and "AI活用" match while "OpenAI" and "HTML" do not.
+            pattern = re.compile(r"(?<![A-Za-z0-9])" + body + r"(?![A-Za-z0-9])")
+        else:
+            pattern = re.compile(r"(?<!\w)" + body + r"(?!\w)", re.I)
+        if pattern.search(text):
+            found.add(t)
+            text = pattern.sub(lambda m: "\0" * len(m.group()), text)
+    return [t for t in terms if t in found]
+
+
+def category_weight(source):
+    return sum(CATEGORY_WEIGHT.get(c.strip().lower(), 0) for c in str(source.get("categories") or "").split(";"))
 
 
 def classify(source):
     text = " ".join(str(source.get(k) or "") for k in ("name", "hero_text", "description", "categories", "author_bio"))
-    tech, app, editorial = matches(text, TECH), matches(text, APPLICATION), matches(text, EDITORIAL)
+    found = matches(text, TECH + APPLICATION + EDITORIAL)
+    tech, app, editorial = ([t for t in found if t in group] for group in (TECH, APPLICATION, EDITORIAL))
     descriptive = " ".join(str(source.get(k) or "") for k in ("hero_text", "description", "author_bio"))
     # Strong requires multiple technical clues, at least one in descriptive prose.
     if len(tech) >= 2 and matches(descriptive, TECH):
@@ -84,7 +106,12 @@ def classify(source):
         fit, score = FITS[2], 10 + len(editorial)
     else:
         fit, score = (FITS[4] if len(norm(descriptive)) < 30 else FITS[3]), 0
+    # The category only ranks publications that already have a topical signal; alone it is not fit evidence.
+    weight = category_weight(source) if score else 0
+    score += weight
     reasons = ["Local metadata signals: " + ", ".join(tech + app + editorial)] if tech + app + editorial else ["No specific connection in available metadata."]
+    if weight:
+        reasons.append(f"Category weight +{weight}: {norm(source.get('categories'))}")
     reasons.append("Provisional triage only; article evidence and human review are required. Subscriber estimates and first_post_date do not establish fit or recent activity.")
     return fit, score, reasons
 

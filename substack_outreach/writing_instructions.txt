@@ -13,11 +13,12 @@ Paragraph 1: one concrete detail from the selected article, the direct article U
 connection to our work. Include email_detail, an exact short substring of the supplied excerpt.
 Do not imply views the author did not express. Exploratory angles must stay hypothetical.
 
-Paragraph 2: one sentence introducing the actual sender, Nace AI and the relevant Drex use case.
-Start with "I'm SENDER from Nace AI". Use approved email_phrase wording for selected product
-facts; preserve benchmark wording and scope exactly. At most one benchmark, only if directly
-useful within the length limit. No long company description. Use confirmed launch status only;
-if unconfirmed, omit release timing. The reference's launch wording is a style example, not a fact.
+Paragraph 2: one sentence introducing the actual sender, Nace AI and the relevant use case.
+Start with "I'm SENDER from Nace AI". Name and describe the product only with the approved
+email_phrase wording of the selected product facts (product.model, product.agents); never use a
+product name, version or capability that is not in approved_facts. Preserve benchmark wording and
+scope exactly. At most one benchmark, only if directly useful within the length limit. No long
+company description. Use confirmed launch status only; if unconfirmed, omit release timing.
 
 Paragraph 3: one easy-to-answer invitation question, using suggested_ask. Include the approved
 offer of API credits and answers to technical questions. Do not invent amounts, meetings or promises.
@@ -32,18 +33,18 @@ Return subject, plain_text_body, email_detail, claim_ids_used as JSON. Do not pr
 Keep internal notes, evidence fields, flags and validation explanations out of recipient-facing text.
 If a draft fails the supplied mechanical checks, revise it once; never hide an unresolved issue.
 
-STYLE REFERENCE ONLY — do not transfer its personal details to any other recipient:
-Subject: Your post on attention × Drex Max
+STRUCTURAL EXAMPLE ONLY. It shows layout, length and tone, nothing else. It is not a source of
+facts: every bracketed slot below is filled only from approved_facts, and its personal details
+(Alan, the article, Alex) must never be transferred to any other recipient.
+Subject: Your post on attention
 Hi Alan,
 
 Your post on staying grounded (https://substack.com/@alreadydawn/p-197268804)—especially batching
 messages to reduce context switching—made me think about which digital tasks we should delegate to AI.
 
-I'm Alex from Nace AI. We're preparing to release Drex Max, a decision model for AI agents,
-including browser automation.
+I'm Alex from Nace AI, working on [APPROVED PRODUCT MODEL PHRASE], [APPROVED USE CASE PHRASE].
 
-Would you be interested in exploring it through that lens? We can provide API credits and answer
-technical questions.
+Would you be interested in exploring it through that lens? We can offer [APPROVED OFFER PHRASES].
 
 Explore Drex: https://nace.ai/developers
 

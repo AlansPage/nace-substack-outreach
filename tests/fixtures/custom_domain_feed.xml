@@ -1,0 +1,5 @@
+<rss version="2.0"><channel><title>Testing Weekly</title>
+<item><title>Scoring agent actions</title><link>https://testing.example/p/scoring</link>
+<pubDate>Thu, 01 Oct 2026 12:00:00 GMT</pubDate>
+<description>Browser agents need explicit evaluation of each action before committing changes in a workflow.</description></item>
+</channel></rss>

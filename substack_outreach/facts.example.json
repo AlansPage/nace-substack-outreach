@@ -24,7 +24,7 @@
     },
     {
       "id": "product.model",
-      "email_phrase": "a multimodal decision model",
+      "email_phrase": "an example model described by your approved registry",
       "text": "EXAMPLE: a one-line description of your product.",
       "source": "EXAMPLE: placeholder entry. Replace with your own sourced, verified fact before use.",
       "approval_status": "pending",
@@ -45,7 +45,7 @@
     },
     {
       "id": "product.agents",
-      "email_phrase": "for browser-use agents making decisions from screenshots",
+      "email_phrase": "for the example use case your team approves",
       "text": "EXAMPLE: the intended use cases for your product.",
       "source": "EXAMPLE: placeholder entry. Replace with your own sourced, verified fact before use.",
       "approval_status": "pending",

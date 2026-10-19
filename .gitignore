@@ -10,6 +10,8 @@ All channels*
 *.sqlite3-*
 # Your real facts registry. facts.example.json is the committed placeholder.
 substack_outreach/facts.json
+# Your do-not-contact list. dnc.example.json is the committed seed.
+substack_outreach/dnc.json
 # Local configuration (sender identity, paths, provider settings)
 substack.config.json
 # Secrets

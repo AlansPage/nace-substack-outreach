@@ -94,6 +94,22 @@ Save this through the UI or `update PUBLICATION_ID .local/permission.json`. Set 
 py -3.12 -m substack_outreach --config .\substack.config.json process --collect --batch 20
 ```
 
+### Default feed permission (team policy decision)
+
+`default_feed_permission` in `substack.config.json` is `null` by default, and the code never fills it in. Setting it is a **team policy decision**, not a technical setting: an authorized person decides that the team's documented basis covers automated reading of public RSS for every imported Substack publication. Record that basis, a link to where it is written down, and a review date:
+
+```json
+{
+  "default_feed_permission": {
+    "permission_basis": "Team policy decision: who decided, what it covers, and why",
+    "permission_source_url": "https://your-team.example/policy/substack-research",
+    "permission_review_date": "2027-01-31"
+  }
+}
+```
+
+Exactly these three keys are accepted; the URL must be HTTPS and the date `YYYY-MM-DD`, or the worker refuses to start. When set, the collector treats it as the research permission for a publication that (1) came from the workbook with a `pub_id`, which identifies it as a Substack publication, (2) has a resolved `publication_url`, and (3) has no explicit `research` block. That includes custom domains: their feed is found through the existing publisher-linked RSS/Atom discovery. An explicit per-publication `research` block always wins, even an incomplete one, and the default never adds a `feed_url`. After the review date, collection stops with `SOURCE_PERMISSION_REVIEW_REQUIRED` until someone renews it. Collected articles carry the default's `permission_basis` and `permission_source_url` as their provenance. Set it back to `null` to withdraw it. Robots rules, rate limits, redirect refusal, the 2 MB cap and same-host checks apply unchanged.
+
 For a supported `*.substack.com` publication, `/feed` is a candidate verified by RSS parsing. Custom domains use publisher-linked RSS/Atom discovery or an explicitly supplied feed. Cross-domain feeds/redirects require separate review and manual import in this version. The collector checks robots rules, rate limits, public HTTPS destinations and permission expiry. Missing/unavailable robots rules fail closed. HTTP 401/403/429 and redirects stop collection; bounded retries apply only to transient failures. No article-page scraper is included. Up to five recent accessible feed items are sorted by dates; unknown dates remain unknown. Parsed selected excerpts and robots rules are cached; whole feeds/pages are not persisted. Existing articles are reused on resume; deliberate refresh can be supplied through research import.
 
 ## Facts, launch status, model and sender

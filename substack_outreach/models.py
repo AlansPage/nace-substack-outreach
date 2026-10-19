@@ -32,19 +32,37 @@ def writing_input(pub, evidence, facts, sender):
 
 
 class MockWriter:
+    """Deterministic preview. Product and offer wording comes only from the facts registry."""
     name = "mock"
+
+    def __init__(self, facts=None):
+        # The registry lets a preview show pending wording; validation then flags CLAIM_NOT_APPROVED.
+        self.facts = facts
+
+    def phrases(self, payload, evidence):
+        # Approved facts arrive exactly as the live writer receives them in writing_input().
+        found = {f["id"]: f.get("email_phrase") or f["text"] for f in payload["approved_facts"]}
+        selected = set(evidence.get("selected_claim_ids") or [])
+        for e in (self.facts or {}).get("entries", []):
+            if e["id"] in selected and e["id"] not in found and e["approval_status"] == "pending":
+                found[e["id"]] = e.get("email_phrase") or e["text"]
+        return found
 
     def generate(self, payload, evidence, revision=None):
         sender = payload["sender"]["name"]
         first = payload["recipient"]["first_name"]
+        phrase = self.phrases(payload, evidence)
+        used = [cid for cid in BASE_CLAIMS if cid in phrase]
         detail = evidence.get("email_detail") or " ".join(evidence["supporting_excerpt"].split()[:16]).rstrip(".")
         opening = evidence.get("mock_opening") or f"Your article ({evidence['article_url']}) notes: {detail}. {evidence['drex_connection']}"
-        para2 = f"I'm {sender} from Nace AI, working on Drex Max, a multimodal decision model for browser-use agents making decisions from screenshots."
-        para3 = evidence["suggested_ask"] + " We can offer API credits and answer technical questions."
+        product = ", ".join(phrase[cid] for cid in ("product.model", "product.agents") if cid in phrase)
+        para2 = f"I'm {sender} from Nace AI" + (f", working on {product}." if product else ".")
+        offers = [phrase[cid] for cid in ("offer.credits", "offer.questions") if cid in phrase]
+        para3 = evidence["suggested_ask"] + (" We can offer " + " and ".join(offers) + "." if offers else "")
         body = "\n\n".join([f"Hi {first}," if first else "Hello,", opening, para2, para3,
                             "Explore Drex: https://nace.ai/developers", f"Best,\n{sender}"])
-        return {"subject": evidence.get("mock_subject") or "Your article and Drex Max", "plain_text_body": body,
-                "email_detail": detail, "claim_ids_used": list(BASE_CLAIMS)}
+        return {"subject": evidence.get("mock_subject") or "Your article and Nace AI", "plain_text_body": body,
+                "email_detail": detail, "claim_ids_used": used}
 
 
 class OpenAIWriter:
