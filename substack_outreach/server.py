@@ -62,6 +62,8 @@ def serve(config, port=8765):
                     return self.send(pipeline.store.metrics())
                 if u.path == "/api/substack/export":
                     fmt = query.get("format", "json")
+                    if fmt not in ("csv", "json"):
+                        raise ValueError("The worker exports csv or json; build the send sheet with the CLI")
                     return self.send(pipeline.export(fmt, query.get("scope", "pilot")), content_type="text/csv; charset=utf-8" if fmt == "csv" else "application/json; charset=utf-8")
                 if u.path.startswith("/api/substack/publication/"):
                     pub = pipeline.detail(int(u.path.rsplit("/", 1)[1]))

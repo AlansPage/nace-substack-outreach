@@ -1,0 +1,5 @@
+{
+  "selected_claim_ids": ["product.model", "product.agents", "offer.credits", "offer.questions", "offer.sponsorship", "link.developers"],
+  "sponsorship_sentence": "We can offer a sponsored post at your published rate.",
+  "editorial_sentence": "We can offer API credits and answer technical questions."
+}

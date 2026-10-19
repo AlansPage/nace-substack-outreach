@@ -10,6 +10,7 @@ Python 3.12+ and Node 18+ are sufficient. The worker and static build use the Py
 Set-Location 'C:\path\to\substack-outreach'
 py -3.12 -m venv .venv-substack
 Copy-Item .\substack_outreach\config.example.json .\substack.config.json
+Copy-Item .\substack_outreach\dnc.example.json .\substack_outreach\dnc.json
 .\.venv-substack\Scripts\python.exe build.py
 .\.venv-substack\Scripts\python.exe -m substack_outreach --config .\substack.config.json pilot --input '.\All channels .xlsx' --batch 20 --shortlist 100
 .\.venv-substack\Scripts\python.exe -m substack_outreach --config .\substack.config.json serve
@@ -29,6 +30,20 @@ hero_text, author_bio, pub_id, author_id
 Every row, including duplicate source rows and extra fields, is retained in SQLite. IDs normalize Excel numeric/scientific notation, and deduplication uses publication ID or canonical publication URL. Conflicting previously separate identities are flagged, not silently merged. Missing values stay unknown. Subscriber counts are imported estimates; creation/first-post dates do not establish recent activity. Local triage uses descriptive metadata and explanatory signals, never subscriber counts. Strong technical, application and exploratory fits have different priorities.
 
 The first run imports all rows locally, shortlists 100, and persists a 20-record pilot. It does **not** fetch 15,617 publications. Repeating the command resumes the same pilot without duplicate source rows or regenerated drafts. Increasing `--batch` extends the persisted pilot; it does not rotate silently. The fixture is separate from the pilot.
+
+### Triage signals and the do-not-contact list
+
+Local triage matches terms in the name, description, categories and author bio. Besides the longer phrases (AI engineering, AI agents, machine learning, LLM, …) it counts the bare terms `AI`, `A.I.`, `GPT`, `ChatGPT`, `ML`, `deep learning`, `agents`, `data science` and `automation`. `AI`, `A.I.`, `ML` and `GPT` are case-sensitive and must stand alone in ASCII text, so `OpenAI`, `HTML`, French `j'ai` and `100 ml` do not count, while `AIとWeb3` does. A term inside a longer match (`agents` in `AI agents`) is not counted twice. The Technology category adds +5 to the score of a publication that already has a topical signal; the category alone is never fit evidence.
+
+`dnc_path` (default `substack_outreach/dnc.json`, gitignored) is the do-not-contact list for vendor-owned publications. When it is missing, the committed seed `substack_outreach/dnc.example.json` is used, and the import result names the list it used. Entries match exactly (case-insensitive) on `hosts` (publication host without `www.`), `author_names`, `names` or `pub_ids`. Every entry needs an `owner`, a `reason` and a `source` explaining why it is listed:
+
+```json
+{"entries": [{"owner": "OpenAI", "hosts": ["openaiglobalaffairs.substack.com"],
+              "author_names": ["OpenAI Global Affairs"], "reason": "Vendor-owned publication",
+              "source": "Workbook row: author_name 'OpenAI Global Affairs'"}]}
+```
+
+`import` and `pilot` apply the list on every run, including a resumed workbook, through the same suppression as **Do not contact author**: the author and every linked publication become `Do not contact` and leave the shortlist. A personal newsletter written by a vendor employee is not vendor-owned; do not list it unless the team decides so.
 
 ## Review workflow
 
@@ -118,7 +133,11 @@ For a supported `*.substack.com` publication, `/feed` is a candidate verified by
 
 `launch_status` is explicit: `unconfirmed`, `scheduled_confirmed` or `released_confirmed`. The launch date never changes release status. Any supplied launch date lives only in your local facts registry. The style reference is not approval of launch wording. By default emails omit release timing.
 
-Writing instructions live in `substack_outreach/writing_instructions.txt`. Style version 2 applies only to new drafts and explicit regeneration: 60–90 body words, hard maximum 110, excluding greeting, link line and signature. Exactly three short paragraphs, one article detail, one use-case sentence, one easy invitation, approved API credits/technical answers, one developer link after the body, and at most one relevant approved benchmark. The model returns text and claim IDs; safe HTML is generated locally. URLs are preserved in plain-text exports. Failed email checks trigger at most one revision; unresolved problems remain visible. Research notes/flags never enter the recipient-facing email.
+Writing instructions live in `substack_outreach/writing_instructions.txt`. Style version 2 applies only to new drafts and explicit regeneration: 60–90 body words, hard maximum 110, excluding greeting, link line and signature. Exactly three short paragraphs, one article detail, one use-case sentence, one easy invitation, the selected approved offer, one developer link after the body, and at most one relevant approved benchmark. The model returns text and claim IDs; safe HTML is generated locally. URLs are preserved in plain-text exports. Failed email checks trigger at most one revision; unresolved problems remain visible. Research notes/flags never enter the recipient-facing email.
+
+Product and offer wording comes only from the registry. Paragraph 2 uses the `email_phrase` of `product.model` and `product.agents`; paragraph 3 states the selected approved offer. The mock writer reads the same phrases (pending ones appear only in mock previews and are flagged `CLAIM_NOT_APPROVED`), and the style reference at the end of `writing_instructions.txt` is a structural example with `[APPROVED …]` slots, not a source of facts. No product name or capability is hard-coded anywhere else.
+
+Invitation formats are `review`, `technical walkthrough` (the default), `roundup inclusion`, `exploratory discussion` and `sponsored post`. The sponsorship offer (`offer.sponsorship`) belongs to the sponsored-post ask only. The writer never receives it for any other ask. A draft that uses it with another ask gets `SPONSORSHIP_OFFER_REQUIRES_SPONSORED_ASK`, and a sponsored ask without it gets `SPONSORED_ASK_REQUIRES_SPONSORSHIP_OFFER`. Sponsored drafts **cannot be approved yet**: they still fail `UNSUPPORTED_PROMISE_OR_PLACEHOLDER` (sponsor wording), `PRODUCT_USE_CASE_SUPPORT_OR_LINK_MISSING` (the API-credit and technical-answer offers are required) and, for a `sponsorship` route, `EDITORIAL_CONTACT_ROUTE_REQUIRED`. The live writers refuse them for the same reason. Lifting those checks for sponsored posts is a pending team decision.
 
 The live adapter uses OpenAI Responses with strict JSON-schema output and `store: false`. Official documentation checked during implementation:
 
@@ -155,6 +174,25 @@ py -3.12 -m substack_outreach --config .\substack.config.json serve
 Remove-Item Env:\OPENAI_API_KEY
 ```
 
+### Local model (free)
+
+`provider: "local"` writes with a model on your own machine through an OpenAI-compatible chat endpoint, such as Ollama's `/v1/chat/completions`. It uses the same strict JSON schema (sent as `response_format` `json_schema`), the same single revision and the same requirements: approved product, use-case, offer and link facts, a confirmed first name, and a named evidence reviewer. It needs no key, budget or pricing. `max_requests_per_run` still caps requests, and run usage records `provider: "local"` with token counts and no cost. `local_base_url` must be a loopback URL (`127.0.0.1`, `localhost` or `::1`); the worker refuses anything else at startup and never uses a proxy for these calls.
+
+```powershell
+ollama pull YOUR_LOCAL_MODEL
+ollama serve
+```
+
+```json
+{
+  "provider": "local",
+  "model": "YOUR_LOCAL_MODEL",
+  "local_base_url": "http://127.0.0.1:11434"
+}
+```
+
+Use a model that follows JSON-schema output. Output that does not match the schema, or a response cut off by `max_output_tokens`, stops generation with an error rather than saving a partial draft.
+
 To change the sender, set that person's confirmed name and actual email together in `sender`; no title/email is inferred. Restart the worker after config changes. The existing Drex classifier adapter remains untouched and is not a writing dependency.
 
 ## Shared contact history
@@ -167,17 +205,46 @@ This worker cannot know that two different handles on different channels are the
 py -3.12 -m substack_outreach --config .\substack.config.json contact-import .\.local\contact-history.json
 ```
 
+## Contact routes from about pages and Gmail
+
+Both sources only **propose** routes. Approval stays blocked until a named person checks each one.
+
+### About-page proposals
+
+Set `collect_contacts: true` and `network_enabled: true` in your local config, then run the command or use **Propose contacts from about pages** in the UI toolbar:
+
+```powershell
+py -3.12 -m substack_outreach --config .\substack.config.json collect-contacts --batch 20
+py -3.12 -m substack_outreach --config .\substack.config.json collect-contacts --batch 20 --retry-failed
+```
+
+For pilot publications that have a resolved `publication_url` but no confirmed route, the collector reads `{publication_url}/about` with the same robots check, rate limit, redirect refusal, 2 MB cap and same-host rule as feed collection. It extracts `mailto:` links, visible email addresses, and X, LinkedIn and personal-site links from the visible page; scripts and embedded JSON are ignored. The result is stored in `contact_route_proposed` with the about URL as its source, and `contact_route` is never written. While a proposal is open, drafts carry `CONTACT_PROPOSED_UNCONFIRMED`, which blocks approval. In the publication's **Recipient & contact** card, choose a proposed route and its type, enter your name, and press **Confirm proposed contact** (or **Dismiss proposal**). Confirming runs the usual recipient validation and records the about page as `contact_source_url`. A robots refusal, HTTP barrier or oversized page is remembered as `failed`; `--retry-failed` tries those again. Pages with nothing usable are marked `none_found`.
+
+### Gmail reply-to import
+
+`scripts/gmail_replyto.gs` is a Google Apps Script you run yourself at script.google.com (new project, paste the file, run `exportSubstackReplyTo`). It only reads messages under one Gmail label (default `Substack`, set in `REPLYTO_LABEL`) and writes a JSON file to your own Drive. The file is an array of `{publication_url, sender_name, reply_to, message_url}`, where `message_url` is the Gmail permalink of the thread. The publication comes from the `List-URL` header, then `List-Id`, then the first direct `/p/` post link in the body. The script sends, labels and deletes nothing. Download the file to `.local\` and import it:
+
+```powershell
+py -3.12 -m substack_outreach --config .\substack.config.json contacts-import .\.local\substack-replyto.json
+py -3.12 -m substack_outreach --config .\substack.config.json contacts-import .\.local\substack-replyto.json --report .\.local\replyto-report.json
+```
+
+Each record is matched by canonical `publication_url`, falling back to the host. Matched records go through the normal recipient update as `contact_kind: "reply_to"`, `contact_confirmed: false`, with the Gmail permalink as `contact_source_url`. A publication that already has a contact route is skipped, never overwritten. Unmatched, ambiguous, skipped and invalid records go only to the report (default `.local\substack\contacts-import-report.json`), not to SQLite. A `reply_to` route stays blocked by `CONTACT_UNVERIFIED` and `EDITORIAL_CONTACT_ROUTE_REQUIRED` until a reviewer verifies it and sets the route type to the right editorial kind. Newsletter reply-to addresses can be per-subscriber relays, so check what the address actually reaches. The `contact-import` command above is different: it imports contact *history*.
+
 ## Exports, fixtures and observability
 
 ```powershell
 py -3.12 -m substack_outreach --config .\substack.config.json export --format csv --scope pilot --out .\.local\pilot.csv
 py -3.12 -m substack_outreach --config .\substack.config.json export --format json --scope pilot --out .\.local\pilot.json
+py -3.12 -m substack_outreach --config .\substack.config.json export --format sendsheet --scope pilot --out .\.local\sendsheet.html
 py -3.12 -m substack_outreach --config .\substack.config.json metrics
 py -3.12 -m substack_outreach --config .\substack.config.json fixture
 py -3.12 -m substack_outreach --config .\substack.config.json previews
 ```
 
 Exports contain publication, author, publication URL, article URL, excerpt, angle, contact and source, subject/body, owner, status and flags. CSV values are guarded against formula injection. Draft records include safe HTML and exact evidence/claim snapshots. Do not export private data into `public/`; the CLI rejects it.
+
+`--format sendsheet` writes one private HTML page listing only publications whose current draft is approved. The approval is checked again on export, so a draft whose approval no longer holds is left out. Each entry shows the recipient, subject and plain-text body, with a copy button for each, and an **Open in mail app** link prefilled with recipient, subject and body (`mailto:`). A non-email route gets a link to the route instead. The page sends nothing; it only removes copy-paste friction. After you send a message yourself, use **Record sent manually** in the workspace. The worker API does not serve this page, and the file holds contact data, so keep it in `.local\`.
 
 `previews` writes `.local/substack/fixture-previews.json` and a clickable HTML companion. All three variants use **the same Alan example** and only the user-supplied summary, never fetched text or invented recipients. The article title is a supplied description, the date/contact/publication domain remain unknown, and the fit remains exploratory. The fixture cannot be approved. Generating the preview artifact does not overwrite any edited draft. Select **All imported + fixture** and search `user-supplied fixture` to review it in the UI.
 
@@ -192,6 +259,6 @@ py -3.12 build.py
 git diff --check
 ```
 
-The pilot ran locally with 15,617 source rows, 100 shortlisted publications and a 20-publication pilot. No live publisher retrieval or paid model calls were made; the 20 records need permitted article research. Tests cover mapping/deduplication, profiles, missing identity/contact data, RSS/Atom excerpts, resume, evidence and claim failures, approval/version changes, cross-channel history, suppression, exports, safe links/rendering, body length, one-revision limits, and the standalone page shell.
+The pilot ran locally on the 525-row Technology workbook: 253 publications with a fit signal, 1 suppressed by the do-not-contact seed, 250 shortlisted and a 20-publication pilot. Earlier it ran on the 15,617-row all-channels workbook. No live publisher retrieval, about-page fetch or model call was made; the 20 records need permitted article research. Tests cover mapping/deduplication, triage terms and the do-not-contact list, profiles, missing identity/contact data, RSS/Atom excerpts, default feed permission, about-page and Gmail contact proposals, resume, evidence and claim failures, registry-driven wording, offer rules, approval/version changes, cross-channel history, suppression, exports including the send sheet, safe links/rendering, body length, one-revision limits for the OpenAI and local writers, and the standalone page shell. Saved test fixtures live in `tests/fixtures/`.
 
-Semantic correctness, source permissions, public identity, whether a paraphrase is fair, and outreach suitability still require human review. Official API schemas were checked, but live model access/pricing and real publisher feeds have not been exercised. The worker is for one trusted local operator: loopback binding, Host/Origin checks, no CORS and a per-session mutation token; it is not an Internet-facing multi-user service. Static builds remain independent of the worker/database/API key.
+Semantic correctness, source permissions, public identity, whether a paraphrase is fair, and outreach suitability still require human review. Official API schemas were checked, but live model access/pricing, a real local model server, real publisher feeds and about pages, and the Gmail script against a real mailbox have not been exercised. The worker is for one trusted local operator: loopback binding, Host/Origin checks, no CORS and a per-session mutation token; it is not an Internet-facing multi-user service. Static builds remain independent of the worker/database/API key.

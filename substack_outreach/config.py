@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 
+from .models import check_local_base_url
 from .sources import check_default_permission
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -15,8 +16,9 @@ def load_config(path=None):
             raise ValueError(f"{key} must be a positive integer")
     if not 1 <= config["max_articles"] <= 5 or not 0 <= config["max_retries"] <= 3:
         raise ValueError("max_articles must be 1..5; max_retries must be 0..3")
-    if config["provider"] not in ("mock", "openai"):
-        raise ValueError("Supported writing adapters: mock, openai")
+    if config["provider"] not in ("mock", "openai", "local"):
+        raise ValueError("Supported writing adapters: mock, openai, local")
+    check_local_base_url(config["local_base_url"])
     for key in ('database', 'registry_path', 'dnc_path'):
         target = Path(config[key]).resolve()
         public = (ROOT / 'public').resolve()

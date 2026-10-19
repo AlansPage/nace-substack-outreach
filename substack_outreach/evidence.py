@@ -10,8 +10,17 @@ from .common import FITS, TECH, canonical, digest, dumps, matches, norm, now, sa
 ASKS = {"review": "Would you be open to evaluating our model for a possible review?",
         "technical walkthrough": "Would a technical walkthrough of this use case be useful for your publication?",
         "roundup inclusion": "Would you consider evaluating our model for inclusion in a relevant roundup?",
-        "exploratory discussion": "Would you be open to an exploratory discussion about which digital decisions people would choose to delegate?"}
+        "exploratory discussion": "Would you be open to an exploratory discussion about which digital decisions people would choose to delegate?",
+        "sponsored post": "Would you consider a sponsored post about this use case for your readers?"}
 BASE_CLAIMS = ["product.model", "product.agents", "offer.credits", "offer.questions", "link.developers"]
+SPONSORED, SPONSORSHIP_OFFER = "sponsored post", "offer.sponsorship"
+
+
+def offers_for(ask_format, offer_ids):
+    """The selected offers a paragraph 3 may state: only the sponsorship offer for a sponsored post, never otherwise."""
+    if ask_format == SPONSORED:
+        return [cid for cid in offer_ids if cid == SPONSORSHIP_OFFER]
+    return [cid for cid in offer_ids if cid != SPONSORSHIP_OFFER]
 
 
 def registry(store, path):
@@ -162,6 +171,11 @@ def validate(store, pub, draft, facts, facts_hash):
             flags.append("CLAIM_SCOPE_OR_TEXT_CHANGED:" + cid)
     if not set(ids).issubset(e.get("selected_claim_ids", [])):
         flags.append("CLAIMS_OUTSIDE_EVIDENCE_SELECTION")
+    # A paid sponsorship is a separate kind of ask; it never rides along with an editorial pitch.
+    if SPONSORSHIP_OFFER in ids and e.get("ask_format") != SPONSORED:
+        flags.append("SPONSORSHIP_OFFER_REQUIRES_SPONSORED_ASK")
+    if e.get("ask_format") == SPONSORED and SPONSORSHIP_OFFER not in ids:
+        flags.append("SPONSORED_ASK_REQUIRES_SPONSORSHIP_OFFER")
     # Catch undeclared registry facts even if the model omitted them from its IDs.
     for cid, entry in entries.items():
         if norm(entry["text"]) in norm(text + " " + subject) and cid not in ids:

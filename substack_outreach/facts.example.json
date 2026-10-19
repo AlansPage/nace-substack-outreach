@@ -127,6 +127,17 @@
       "expiry_or_review_date": null
     },
     {
+      "id": "offer.sponsorship",
+      "email_phrase": "a sponsored post at your published rate",
+      "text": "EXAMPLE: the sponsorship offer and rate policy your team approves. Only used when ask_format is 'sponsored post'.",
+      "source": "EXAMPLE: placeholder entry. Replace with your own sourced, verified fact before use.",
+      "approval_status": "pending",
+      "approved_by": null,
+      "approved_at": null,
+      "scope": "offer",
+      "expiry_or_review_date": null
+    },
+    {
       "id": "link.developers",
       "text": "https://nace.ai/developers",
       "source": "EXAMPLE: placeholder entry. Replace with your own sourced, verified fact before use.",

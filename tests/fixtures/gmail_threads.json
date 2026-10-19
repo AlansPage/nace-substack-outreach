@@ -1,0 +1,27 @@
+[
+  {"permalink": "https://mail.google.com/mail/u/0/#all/t-list-url",
+   "messages": [
+     {"from": "\"Sam Example\" <testingweekly@substack.com>", "replyTo": "Sam Example <reply+abc@testing.example>",
+      "date": "2026-09-01T10:00:00Z", "headers": {"List-URL": "<https://www.testing.example/>"}, "body": ""},
+     {"from": "Sam Example <testingweekly@substack.com>", "replyTo": "reply+newer@testing.example",
+      "date": "2026-10-01T10:00:00Z", "headers": {"List-URL": "<https://www.testing.example/>"}, "body": ""},
+     {"from": "Sam Example <testingweekly@substack.com>", "replyTo": "reply+newer@testing.example",
+      "date": "2026-09-15T10:00:00Z", "headers": {"List-URL": "<https://www.testing.example/>"}, "body": ""}
+   ]},
+  {"permalink": "https://mail.google.com/mail/u/0/#all/t-list-id",
+   "messages": [
+     {"from": "Pat Writer <patwriter@substack.com>", "replyTo": "Pat Writer <pat@writer.example>",
+      "date": "2026-10-02T10:00:00Z", "headers": {"List-Id": "Pat's notes <patnotes.substack.com>"}, "body": ""}
+   ]},
+  {"permalink": "https://mail.google.com/mail/u/0/#all/t-body",
+   "messages": [
+     {"from": "Lee <lee@substack.com>", "replyTo": "lee@leeletter.example",
+      "date": "2026-10-03T10:00:00Z", "headers": {},
+      "body": "<a href=\"https://substack.com/redirect/2/abc\">x</a> <a href=\"https://leeletter.example/p/first-post?utm_source=email\">Read</a>"}
+   ]},
+  {"permalink": "https://mail.google.com/mail/u/0/#all/t-unknown",
+   "messages": [
+     {"from": "Platform <no-reply@substack.com>", "replyTo": "",
+      "date": "2026-10-04T10:00:00Z", "headers": {"List-URL": "<https://substack.com/>"}, "body": "<a href=\"https://substack.com/@someone\">profile</a>"}
+   ]}
+]

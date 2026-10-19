@@ -12,8 +12,9 @@ from substack_outreach.common import FITS, canonical, classify, dumps, html_emai
 from substack_outreach.config import ROOT, load_config
 from substack_outreach.evidence import ASKS, BASE_CLAIMS, evidence_checks, prepare_evidence, style_checks
 from substack_outreach.fixtures import add_fixture, previews
-from substack_outreach.models import MockWriter, OpenAIWriter, writing_input
-from substack_outreach.pipeline import Pipeline, csv_safe
+from substack_outreach.models import INSTRUCTIONS, SCHEMA, LocalWriter, MockWriter, OpenAIWriter, writing_input
+from html import escape as html_escape
+from substack_outreach.pipeline import Pipeline, csv_safe, mailto_link, sendsheet_html
 from substack_outreach.sources import Collector, Run, extract_contacts, parse_feed, public_https, save_articles
 from substack_outreach.store import load_dnc
 from substack_outreach.workbook import identifier, read_workbook
@@ -213,6 +214,53 @@ class PipelineTests(unittest.TestCase):
                 text = path.read_text(encoding='utf-8')
                 for term in ('Drex Max', 'screenshots', 'browser-use agents', 'multimodal decision model'):
                     self.assertNotIn(term, text, f'{path.name} hard-codes {term!r}')
+
+    def select_offer(self, pid, ask_format):
+        fx = json.loads((FIXTURES / 'sponsored_selection.json').read_text(encoding='utf-8'))
+        e = self.p.store.get(pid)['evidence']
+        e.update(selected_claim_ids=fx['selected_claim_ids'], ask_format=ask_format, suggested_ask=ASKS[ask_format])
+        self.p.update(pid, {'evidence': e})
+        return fx, e
+
+    def test_sponsored_ask_exists_but_default_stays_editorial(self):
+        self.assertIn('sponsored post', ASKS)
+        pid = self.pub(); self.research(pid)
+        e = self.p.store.get(pid)['evidence']
+        self.assertEqual(e['ask_format'], 'technical walkthrough')
+        self.assertNotIn('offer.sponsorship', e['selected_claim_ids'])
+        from substack_outreach.models import INSTRUCTIONS
+        paragraph3 = ' '.join(INSTRUCTIONS[INSTRUCTIONS.index('Paragraph 3'):INSTRUCTIONS.index('Explore Drex')].split())
+        self.assertIn('selected approved offer', paragraph3)
+        self.assertNotIn('API credits', paragraph3)
+
+    def test_editorial_ask_never_states_sponsorship_even_when_selected(self):
+        pid = self.pub(); self.research(pid); self.approve_facts()
+        fx, e = self.select_offer(pid, 'technical walkthrough')
+        facts, _ = self.p.facts()
+        payload = writing_input(self.p.store.get(pid), e, facts, self.config['sender'])
+        self.assertNotIn('offer.sponsorship', [f['id'] for f in payload['approved_facts']])
+        self.assertEqual(payload['pitch_angle']['ask_format'], 'technical walkthrough')
+        d = self.p.generate(pid)['draft']
+        self.assertIn(fx['editorial_sentence'], d['plain_text_body'])
+        self.assertNotIn('sponsor', d['plain_text_body'].lower())
+        self.assertNotIn('offer.sponsorship', d['claim_ids_used'])
+        d = self.p.edit(pid, {'subject': d['subject'], 'plain_text_body': d['plain_text_body'], 'claim_ids_used': d['claim_ids_used'] + ['offer.sponsorship']})['draft']
+        self.assertIn('SPONSORSHIP_OFFER_REQUIRES_SPONSORED_ASK', d['validation']['blocking_flags'])
+
+    def test_sponsored_ask_states_only_the_sponsorship_offer(self):
+        pid = self.pub(); self.research(pid); self.approve_facts()
+        fx, e = self.select_offer(pid, 'sponsored post')
+        facts, _ = self.p.facts()
+        payload = writing_input(self.p.store.get(pid), e, facts, self.config['sender'])
+        self.assertEqual([f['id'] for f in payload['approved_facts'] if f['scope'] == 'offer'], ['offer.sponsorship'])
+        d = self.p.generate(pid)['draft']
+        self.assertIn(ASKS['sponsored post'] + ' ' + fx['sponsorship_sentence'], d['plain_text_body'])
+        self.assertNotIn('API credits', d['plain_text_body'])
+        self.assertIn('offer.sponsorship', d['claim_ids_used'])
+        self.assertNotIn('SPONSORED_ASK_REQUIRES_SPONSORSHIP_OFFER', d['review_flags'])
+        # Still blocked: the "sponsor" wording check and the base-claim requirement are unchanged.
+        for flag in ('UNSUPPORTED_PROMISE_OR_PLACEHOLDER', 'PRODUCT_USE_CASE_SUPPORT_OR_LINK_MISSING'):
+            self.assertIn(flag, d['validation']['blocking_flags'])
 
     def test_pending_claims_and_mock_cannot_approve(self):
         pid = self.pub(); self.research(pid)
@@ -515,6 +563,89 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(self.p.collect_contacts(retry_failed=True)[0]['result'], 'none_found')
         self.assertNotIn('CONTACT_PROPOSED_UNCONFIRMED', str(self.p.store.get(pid)))
 
+    def bare_pub(self, name, url, author):
+        pid = self.pub(name, author)
+        self.p.store.db.execute("UPDATE publications SET data=json_set(data,'$.publication_url',?,'$.contact_route','','$.contact_source_url','','$.contact_kind','','$.contact_confirmed',json('false')) WHERE id=?", (url, pid))
+        self.p.store.db.commit()
+        return pid
+
+    def test_reply_to_import_matches_by_url_then_host_and_reports_the_rest(self):
+        alpha = self.bare_pub('Alpha', 'https://alpha.example', 'author:a')
+        beta = self.bare_pub('Beta', 'https://beta.example', 'author:b')
+        gamma = self.bare_pub('Gamma', 'https://gamma.example', 'author:g')
+        testing = self.pub()  # already has a confirmed business route
+        report = self.p.import_reply_to(json.loads((FIXTURES / 'replyto_export.json').read_text(encoding='utf-8')))
+        self.assertEqual([(r['publication_id'], r['matched_by']) for r in report['imported']], [(alpha, 'publication_url'), (beta, 'host')])
+        self.assertEqual([r['reason'] for r in report['unmatched']], ['no_match', 'no_publication_url'])
+        self.assertEqual([(r['publication_id'], r['index']) for r in report['skipped']], [(alpha, 2), (testing, 5)])
+        self.assertEqual([r['index'] for r in report['invalid']], [6, 7, 8])
+        self.assertIn('Contact route must be', report['invalid'][0]['reason'])
+        a = self.p.store.get(alpha)
+        self.assertEqual((a['contact_route'], a['contact_source_url'], a['contact_kind'], a['contact_confirmed']),
+                         ('reply@alpha.example', 'https://mail.google.com/mail/u/0/#all/t-alpha', 'reply_to', False))
+        self.assertEqual(self.p.store.get(testing)['contact_route'], 'business@testing.example')
+        self.assertEqual(self.p.store.get(gamma)['contact_route'], '')
+        self.assertFalse(self.p.store.db.execute("SELECT 1 FROM publications WHERE data LIKE '%unknown.example%'").fetchone())
+        self.research(alpha)
+        flags = self.p.generate(alpha)['draft']['validation']['blocking_flags']
+        self.assertIn('CONTACT_UNVERIFIED', flags)
+        self.assertIn('EDITORIAL_CONTACT_ROUTE_REQUIRED', flags)
+
+    def test_contacts_import_cli_writes_private_report(self):
+        import subprocess, sys
+        cfg = self.path / 'cfg.json'
+        cfg.write_text(dumps({'database': self.config['database'], 'registry_path': self.config['registry_path']}), encoding='utf-8')
+        self.bare_pub('Alpha', 'https://alpha.example', 'author:a')
+        report = self.path / 'report.json'
+        r = subprocess.run([sys.executable, '-m', 'substack_outreach', '--config', str(cfg), 'contacts-import', str(FIXTURES / 'replyto_export.json'), '--report', str(report)],
+                           cwd=ROOT, capture_output=True, text=True, encoding='utf-8')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout)['imported'], 1)
+        self.assertEqual(len(json.loads(report.read_text(encoding='utf-8'))['unmatched']), 5)
+        r = subprocess.run([sys.executable, '-m', 'substack_outreach', '--config', str(cfg), 'contacts-import', str(FIXTURES / 'replyto_export.json'), '--report', str(ROOT / 'public' / 'r.json')],
+                           cwd=ROOT, capture_output=True, text=True, encoding='utf-8')
+        self.assertEqual(r.returncode, 2)
+        self.assertIn('public static assets', r.stderr)
+
+    def test_sendsheet_lists_only_current_approved_drafts(self):
+        fx = json.loads((FIXTURES / 'sendsheet.json').read_text(encoding='utf-8'))
+        pid, p = self.ready()
+        p = self.p.edit(pid, {'subject': fx['subject'], 'plain_text_body': p['draft']['plain_text_body'], 'human_authored': True})
+        self.assertEqual(p['draft']['validation']['blocking_flags'], [])
+        self.p.action(pid, 'approve', {'reviewer': 'Human', 'semantic_review_confirmed': True})
+        other = self.pub('Unapproved publication', 'author:99'); self.research(other); self.p.generate(other)
+        page = self.p.export('sendsheet')
+        self.assertEqual(page.count('<article>'), 1)
+        self.assertNotIn('Unapproved publication', page)
+        self.assertIn('Q&amp;A? &lt;b&gt;agents&lt;/b&gt; &amp; &quot;scoring&quot;', page)
+        self.assertNotIn('<b>agents', page)
+        body = self.p.store.get(pid)['draft']['plain_text_body']
+        self.assertIn(html_escape(mailto_link('business@testing.example', fx['subject'], body)), page)
+        self.assertEqual(page.count('data-copy="'), 3)
+        self.assertIn('Nothing is sent from this page', page)
+        # A withdrawn approval (registry change) drops the draft from the sheet.
+        self.facts['entries'][2]['approval_status'] = 'pending'
+        (self.path / 'facts.json').write_text(dumps(self.facts), encoding='utf-8')
+        self.assertIn('No publication is currently approved', self.p.export('sendsheet'))
+
+    def test_sendsheet_mailto_encoding_and_url_routes(self):
+        fx = json.loads((FIXTURES / 'sendsheet.json').read_text(encoding='utf-8'))
+        m = fx['mailto']
+        self.assertEqual(mailto_link(m['to'], m['subject'], m['body']), m['expected'])
+        page = sendsheet_html([fx['url_route_row']], now())
+        self.assertNotIn('mailto:', page)
+        self.assertIn('href="https://forms.example/submit"', page)
+        import subprocess, sys
+        cfg = self.path / 'cfg.json'
+        cfg.write_text(dumps({'database': self.config['database'], 'registry_path': self.config['registry_path']}), encoding='utf-8')
+        run = lambda out: subprocess.run([sys.executable, '-m', 'substack_outreach', '--config', str(cfg), 'export', '--format', 'sendsheet', '--out', str(out)],
+                                         cwd=ROOT, capture_output=True, text=True, encoding='utf-8')
+        self.assertEqual(run(self.path / 'sheet.html').returncode, 0)
+        self.assertIn('<!doctype html>', (self.path / 'sheet.html').read_text(encoding='utf-8'))
+        refused = run(ROOT / 'public' / 'sheet.html')
+        self.assertEqual(refused.returncode, 2)
+        self.assertIn('public static assets', refused.stderr)
+
     def test_rss_and_atom_parsing_and_incomplete_content(self):
         rss = b'<rss xmlns:content="http://purl.org/rss/1.0/modules/content/"><channel><item><title>Old</title><link>https://x.example/old</link><pubDate>Tue, 01 Sep 2026 12:00:00 GMT</pubDate><description>Old excerpt</description></item><item><title>New</title><link>https://x.example/new</link><pubDate>Thu, 01 Oct 2026 12:00:00 GMT</pubDate><content:encoded>&lt;p&gt;Available text&lt;/p&gt;</content:encoded></item></channel></rss>'
         rows = parse_feed(rss, 'https://x.example/feed', 1)
@@ -579,6 +710,97 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(run.usage[0]['usage']['input_tokens'], 100)
         self.assertIsNone(run.usage[0]['actual_cost_usd'])
         self.assertAlmostEqual(run.usage[0]['estimated_cost_usd'], .0005)
+
+    def ollama_response(self, draft, finish='stop'):
+        envelope = json.loads((FIXTURES / 'ollama_chat_response.json').read_text(encoding='utf-8'))
+        envelope['choices'][0]['message']['content'] = dumps(draft)
+        envelope['choices'][0]['finish_reason'] = finish
+        class FakeResponse(io.BytesIO):
+            pass
+        return FakeResponse(dumps(envelope).encode())
+
+    def test_config_provider_whitelist_and_loopback_local_url(self):
+        cfg = self.path / 'cfg.json'
+        for provider, ok in (('mock', True), ('openai', True), ('local', True), ('anthropic', False), ('ollama', False)):
+            cfg.write_text(dumps({'provider': provider}), encoding='utf-8')
+            if ok:
+                self.assertEqual(load_config(cfg)['provider'], provider)
+            else:
+                with self.assertRaisesRegex(ValueError, 'Supported writing adapters: mock, openai, local'):
+                    load_config(cfg)
+        self.assertEqual(load_config()['local_base_url'], 'http://127.0.0.1:11434')
+        for url in ('http://localhost:11434', 'http://[::1]:11434'):
+            cfg.write_text(dumps({'provider': 'local', 'local_base_url': url}), encoding='utf-8')
+            self.assertEqual(load_config(cfg)['local_base_url'], url)
+        for url in ('http://192.168.1.20:11434', 'https://ollama.example', 'http://user:pw@127.0.0.1:11434', 'file:///tmp/x', ''):
+            cfg.write_text(dumps({'provider': 'local', 'local_base_url': url}), encoding='utf-8')
+            with self.assertRaisesRegex(ValueError, 'loopback'):
+                load_config(cfg)
+
+    def test_local_writer_request_shape_usage_and_cache(self):
+        pid = self.pub(); self.research(pid); self.approve_facts()
+        # No budget, pricing or key is needed for a local model.
+        self.config.update(provider='local', model='fixture-model', allow_paid_calls=False, budget_usd_per_run=0)
+        pub = self.p.store.get(pid); facts, _ = self.p.facts()
+        payload = writing_input(pub, pub['evidence'], facts, self.config['sender'])
+        output = MockWriter().generate(payload, pub['evidence'])
+        run = Run(self.p.store, self.config, 'test')
+        with patch.dict('os.environ', {}, clear=True), patch('urllib.request.OpenerDirector.open', return_value=self.ollama_response(output)) as call:
+            writer = LocalWriter(self.p.store, self.config, run)
+            self.assertEqual(writer.generate(payload, pub['evidence']), output)
+            request = call.call_args[0][0]
+            self.assertEqual(request.full_url, 'http://127.0.0.1:11434/v1/chat/completions')
+            self.assertIsNone(request.get_header('Authorization'))
+            body = json.loads(request.data)
+            self.assertEqual(body['model'], 'fixture-model')
+            self.assertEqual(body['response_format'], {'type': 'json_schema', 'json_schema': {'name': 'outreach_email', 'strict': True, 'schema': SCHEMA}})
+            self.assertEqual(body['messages'][0], {'role': 'system', 'content': INSTRUCTIONS})
+            self.assertNotIn('tools', body)
+            writer.generate(payload, pub['evidence'])
+            self.assertEqual(call.call_count, 1)
+        self.assertEqual(run.requests, 1)
+        self.assertEqual(run.usage[0]['provider'], 'local')
+        self.assertEqual(run.usage[0]['usage'], {'input_tokens': 812, 'output_tokens': 164})
+        self.assertIsNone(run.usage[0]['actual_cost_usd'])
+        self.assertNotIn('estimated_cost_usd', run.usage[0])
+
+    def test_local_writer_rejects_bad_output_and_needs_model(self):
+        pid = self.pub(); self.research(pid); self.approve_facts()
+        self.config.update(provider='local', model='')
+        run = Run(self.p.store, self.config, 'test')
+        with self.assertRaisesRegex(ValueError, 'Set model'):
+            LocalWriter(self.p.store, self.config, run)
+        self.config['model'] = 'fixture-model'
+        pub = self.p.store.get(pid); facts, _ = self.p.facts()
+        payload = writing_input(pub, pub['evidence'], facts, self.config['sender'])
+        for response, message in ((self.ollama_response({'subject': 'x'}), 'expected schema'),
+                                  (self.ollama_response(MockWriter().generate(payload, pub['evidence']), 'length'), 'incomplete')):
+            with patch('urllib.request.OpenerDirector.open', return_value=response):
+                with self.assertRaisesRegex(ValueError, message):
+                    LocalWriter(self.p.store, self.config, run).generate(payload, pub['evidence'])
+
+    def test_local_provider_keeps_review_gate_and_one_revision(self):
+        pid = self.pub(); self.research(pid); self.approve_facts()
+        self.config.update(provider='local', model='fixture-model')
+        pub = self.p.store.get(pid); facts, _ = self.p.facts()
+        bad = MockWriter().generate(writing_input(pub, pub['evidence'], facts, self.config['sender']), pub['evidence'])
+        bad['subject'] = '[recipient]'
+        e = self.p.store.get(pid)['evidence']; e['evidence_reviewed_by'] = ''
+        self.p.update(pid, {'evidence': e})
+        with patch('urllib.request.OpenerDirector.open') as call:
+            with self.assertRaisesRegex(ValueError, 'Review the evidence-backed angle'):
+                self.p.generate(pid)
+            call.assert_not_called()
+        e['evidence_reviewed_by'] = 'Test reviewer'
+        self.p.update(pid, {'evidence': e})
+        with patch('urllib.request.OpenerDirector.open', side_effect=lambda *a, **k: self.ollama_response(bad)) as call:
+            d = self.p.generate(pid)['draft']
+        self.assertEqual(call.call_count, 2)
+        self.assertIn('revision_request', call.call_args_list[1][0][0].data.decode())
+        self.assertEqual((d['provider'], d['model']), ('local', 'fixture-model'))
+        self.assertIn('UNRESOLVED_PLACEHOLDER', d['review_flags'])
+        usage = self.p.store.metrics()['runs'][0]['usage']
+        self.assertEqual([u['provider'] for u in usage], ['local', 'local'])
 
     def test_feed_cache_only_keeps_selected_articles(self):
         pid = self.pub()
