@@ -1,0 +1,26 @@
+# Private inputs and outputs. None of this belongs in a public repository.
+# Source workbook of publications and contact rows
+*.xlsx
+*.xls
+*.csv
+All channels*
+# Local working directory: SQLite, drafts, exports, previews, research imports
+.local/
+*.sqlite3
+*.sqlite3-*
+# Your real facts registry. facts.example.json is the committed placeholder.
+substack_outreach/facts.json
+# Local configuration (sender identity, paths, provider settings)
+substack.config.json
+# Secrets
+.env*
+*.env
+# Build output: regenerate with `python build.py`
+public/
+# Python
+__pycache__/
+*.pyc
+.venv-substack/
+.venv/
+# Editor / OS
+.DS_Store

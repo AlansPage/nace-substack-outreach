@@ -1,0 +1,190 @@
+{
+  "version": 1,
+  "launch_status": "unconfirmed",
+  "entries": [
+    {
+      "id": "company.nace",
+      "text": "EXAMPLE: one sentence describing your company. Replace with a sourced fact.",
+      "source": "EXAMPLE: placeholder entry. Replace with your own sourced, verified fact before use.",
+      "approval_status": "pending",
+      "approved_by": null,
+      "approved_at": null,
+      "scope": "company",
+      "expiry_or_review_date": null
+    },
+    {
+      "id": "launch.schedule",
+      "text": "EXAMPLE: release timing goes here. Keep launch_status unconfirmed until confirmed.",
+      "source": "EXAMPLE: placeholder entry. Replace with your own sourced, verified fact before use.",
+      "approval_status": "pending",
+      "approved_by": null,
+      "approved_at": null,
+      "scope": "launch",
+      "expiry_or_review_date": null
+    },
+    {
+      "id": "product.model",
+      "email_phrase": "a multimodal decision model",
+      "text": "EXAMPLE: a one-line description of your product.",
+      "source": "EXAMPLE: placeholder entry. Replace with your own sourced, verified fact before use.",
+      "approval_status": "pending",
+      "approved_by": null,
+      "approved_at": null,
+      "scope": "product",
+      "expiry_or_review_date": null
+    },
+    {
+      "id": "product.modalities",
+      "text": "EXAMPLE: the input types your product supports.",
+      "source": "EXAMPLE: placeholder entry. Replace with your own sourced, verified fact before use.",
+      "approval_status": "pending",
+      "approved_by": null,
+      "approved_at": null,
+      "scope": "product",
+      "expiry_or_review_date": null
+    },
+    {
+      "id": "product.agents",
+      "email_phrase": "for browser-use agents making decisions from screenshots",
+      "text": "EXAMPLE: the intended use cases for your product.",
+      "source": "EXAMPLE: placeholder entry. Replace with your own sourced, verified fact before use.",
+      "approval_status": "pending",
+      "approved_by": null,
+      "approved_at": null,
+      "scope": "product",
+      "expiry_or_review_date": null
+    },
+    {
+      "id": "benchmark.latency",
+      "text": "EXAMPLE: a latency result. Replace with your own published, approved number.",
+      "source": "EXAMPLE: placeholder entry. Replace with your own sourced, verified fact before use.",
+      "approval_status": "pending",
+      "approved_by": null,
+      "approved_at": null,
+      "scope": "benchmark",
+      "expiry_or_review_date": null
+    },
+    {
+      "id": "benchmark.index",
+      "text": "EXAMPLE: an aggregate benchmark score. Replace with your own published number.",
+      "source": "EXAMPLE: placeholder entry. Replace with your own sourced, verified fact before use.",
+      "approval_status": "pending",
+      "approved_by": null,
+      "approved_at": null,
+      "scope": "benchmark",
+      "expiry_or_review_date": null
+    },
+    {
+      "id": "benchmark.mind2web",
+      "text": "EXAMPLE: a named benchmark result. Replace with your own published number.",
+      "source": "EXAMPLE: placeholder entry. Replace with your own sourced, verified fact before use.",
+      "approval_status": "pending",
+      "approved_by": null,
+      "approved_at": null,
+      "scope": "benchmark",
+      "expiry_or_review_date": null
+    },
+    {
+      "id": "benchmark.datasets",
+      "text": "EXAMPLE: dataset results. Replace with your own published, approved results.",
+      "source": "EXAMPLE: placeholder entry. Replace with your own sourced, verified fact before use.",
+      "approval_status": "pending",
+      "approved_by": null,
+      "approved_at": null,
+      "scope": "benchmark",
+      "expiry_or_review_date": null
+    },
+    {
+      "id": "product.images",
+      "text": "EXAMPLE: a capability claim. Keep comparative claims out until verified.",
+      "source": "EXAMPLE: placeholder entry. Replace with your own sourced, verified fact before use.",
+      "approval_status": "pending",
+      "approved_by": null,
+      "approved_at": null,
+      "scope": "product",
+      "expiry_or_review_date": null
+    },
+    {
+      "id": "offer.credits",
+      "email_phrase": "API credits",
+      "text": "We can offer API credits for evaluation.",
+      "source": "EXAMPLE: placeholder entry. Replace with your own sourced, verified fact before use.",
+      "approval_status": "pending",
+      "approved_by": null,
+      "approved_at": null,
+      "scope": "offer",
+      "expiry_or_review_date": null
+    },
+    {
+      "id": "offer.questions",
+      "email_phrase": "answer technical questions",
+      "text": "We can answer technical questions.",
+      "source": "EXAMPLE: placeholder entry. Replace with your own sourced, verified fact before use.",
+      "approval_status": "pending",
+      "approved_by": null,
+      "approved_at": null,
+      "scope": "offer",
+      "expiry_or_review_date": null
+    },
+    {
+      "id": "link.developers",
+      "text": "https://nace.ai/developers",
+      "source": "EXAMPLE: placeholder entry. Replace with your own sourced, verified fact before use.",
+      "approval_status": "pending",
+      "approved_by": null,
+      "approved_at": null,
+      "scope": "link",
+      "expiry_or_review_date": null
+    },
+    {
+      "id": "link.console",
+      "text": "https://console.nace.ai",
+      "source": "EXAMPLE: placeholder entry. Replace with your own sourced, verified fact before use.",
+      "approval_status": "pending",
+      "approved_by": null,
+      "approved_at": null,
+      "scope": "link",
+      "expiry_or_review_date": null
+    },
+    {
+      "id": "link.openrouter",
+      "text": "https://openrouter.ai/nace-ai",
+      "source": "EXAMPLE: placeholder entry. Replace with your own sourced, verified fact before use.",
+      "approval_status": "pending",
+      "approved_by": null,
+      "approved_at": null,
+      "scope": "link",
+      "expiry_or_review_date": null
+    },
+    {
+      "id": "link.github",
+      "text": "https://github.com/nace-ai/drex-decision-models",
+      "source": "EXAMPLE: placeholder entry. Replace with your own sourced, verified fact before use.",
+      "approval_status": "pending",
+      "approved_by": null,
+      "approved_at": null,
+      "scope": "link",
+      "expiry_or_review_date": null
+    },
+    {
+      "id": "link.huggingface",
+      "text": "https://huggingface.co/nace-ai",
+      "source": "EXAMPLE: placeholder entry. Replace with your own sourced, verified fact before use.",
+      "approval_status": "pending",
+      "approved_by": null,
+      "approved_at": null,
+      "scope": "link",
+      "expiry_or_review_date": null
+    },
+    {
+      "id": "link.x",
+      "text": "https://x.com/NaceAI",
+      "source": "EXAMPLE: placeholder entry. Replace with your own sourced, verified fact before use.",
+      "approval_status": "pending",
+      "approved_by": null,
+      "approved_at": null,
+      "scope": "link",
+      "expiry_or_review_date": null
+    }
+  ]
+}

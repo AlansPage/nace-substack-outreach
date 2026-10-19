@@ -1,0 +1,388 @@
+import copy
+import io
+import json
+import tempfile
+import unittest
+import xml.etree.ElementTree as ET
+from pathlib import Path
+from unittest.mock import patch
+from zipfile import ZipFile
+
+from substack_outreach.common import FITS, canonical, classify, dumps, html_email, is_profile, now, publication_url
+from substack_outreach.config import ROOT, load_config
+from substack_outreach.evidence import ASKS, BASE_CLAIMS, evidence_checks, prepare_evidence, style_checks
+from substack_outreach.fixtures import add_fixture, previews
+from substack_outreach.models import MockWriter, OpenAIWriter, writing_input
+from substack_outreach.pipeline import Pipeline, csv_safe
+from substack_outreach.sources import Collector, Run, parse_feed, public_https, save_articles
+from substack_outreach.workbook import identifier, read_workbook
+
+
+def workbook(path, rows):
+    """Small real OOXML fixture with reordered headers, inline strings and sparse cells."""
+    ns = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'
+    root = ET.Element('worksheet', xmlns=ns)
+    data = ET.SubElement(root, 'sheetData')
+    for n, values in enumerate(rows, 1):
+        row = ET.SubElement(data, 'row', r=str(n))
+        for i, value in enumerate(values):
+            if value is None:
+                continue
+            c = ET.SubElement(row, 'c', r=f'{chr(65+i)}{n}', t='inlineStr')
+            ET.SubElement(ET.SubElement(c, 'is'), 't').text = str(value)
+    with ZipFile(path, 'w') as z:
+        z.writestr('xl/workbook.xml', f'<workbook xmlns="{ns}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="substack" r:id="rId7"/></sheets></workbook>')
+        z.writestr('xl/_rels/workbook.xml.rels', '<Relationships><Relationship Id="rId7" Target="worksheets/sheet3.xml"/></Relationships>')
+        z.writestr('xl/worksheets/sheet3.xml', ET.tostring(root))
+
+
+class PipelineTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.path = Path(self.temp.name)
+        self.config = load_config()
+        self.config['database'] = str(self.path / 'test.sqlite3')
+        self.config['registry_path'] = str(self.path / 'facts.json')
+        self.facts = json.loads((ROOT / 'substack_outreach/facts.example.json').read_text(encoding='utf-8'))
+        (self.path / 'facts.json').write_text(dumps(self.facts), encoding='utf-8')
+        self.p = Pipeline(self.config)
+
+    def tearDown(self):
+        self.p.store.close()
+        self.temp.cleanup()
+
+    def pub(self, name='Test engineering', author='author:42'):
+        data = {'publication': name, 'publication_url': 'https://testing.example', 'profile_url': 'https://substack.com/@publicwriter',
+                'source': {}, 'source_kind': 'manual', 'author_name': 'Sam Example', 'confirmed_first_name': 'Sam',
+                'name_source': 'https://testing.example/about', 'owner': '', 'contact_route': 'business@testing.example',
+                'contact_source_url': 'https://testing.example/contact', 'contact_kind': 'business', 'contact_confirmed': True,
+                'fit_category': FITS[0], 'fit_reasons': ['Test evidence'], 'import_flags': [], 'research': {}, 'evidence': None}
+        cur = self.p.store.db.execute('INSERT INTO publications(data,score,author_key,pilot,shortlisted,status) VALUES(?,100,?,1,1,?)', (dumps(data), author, 'Shortlisted'))
+        self.p.store.db.commit()
+        return cur.lastrowid
+
+    def research(self, pid):
+        article = {'title': 'Testing browser agents', 'url': 'https://testing.example/p/agents', 'date': now(),
+                   'byline': 'Sam Example', 'text': 'Browser agents need explicit evaluation of each action before committing changes in a workflow.',
+                   'content_status': 'complete', 'source_kind': 'manual', 'source_url': 'https://testing.example/p/agents',
+                   'permission_basis': 'Test-only supplied text', 'membership_confirmed': True, 'relationship_source': 'https://testing.example/archive'}
+        save_articles(self.p.store, self.p.store.get(pid), [article], supplied=True)
+        e = prepare_evidence(self.p.store.get(pid))
+        e['evidence_reviewed_by'] = 'Test reviewer'
+        self.p.update(pid, {'evidence': e})
+        return article
+
+    def approve_facts(self):
+        for e in self.facts['entries']:
+            e.update(approval_status='approved', approved_by='Test only', approved_at=now())
+        self.facts['version'] += 1
+        (self.path / 'facts.json').write_text(dumps(self.facts), encoding='utf-8')
+
+    def ready(self):
+        pid = self.pub()
+        self.research(pid)
+        self.approve_facts()
+        drafted = self.p.generate(pid)
+        body = drafted['draft']['plain_text_body']
+        result = self.p.edit(pid, {'subject': drafted['draft']['subject'], 'plain_text_body': body, 'human_authored': True})
+        self.assertEqual(result['draft']['validation']['blocking_flags'], [])
+        return pid, result
+
+    def test_workbook_mapping_dedup_and_resume(self):
+        path = self.path / 'input.xlsx'
+        workbook(path, [['author_id', 'url', 'name', 'pub_id', 'author_name', 'hero_text', 'free_subscribers', 'extra'],
+            ['42.0', 'https://a.example/', 'A', '1.0', None, 'AI agents and LLM engineering', '1000.0', '=1+1'],
+            ['42', 'https://a.example?utm_source=x', 'A duplicate', '1', None, None, None, None],
+            ['42', 'https://b.example', 'B', '2', None, 'Browser agents and model evaluation', None, None]])
+        headers, rows = read_workbook(path)
+        self.assertEqual(headers[0], 'author_id')
+        self.assertIsNone(rows[0][1]['author_name'])
+        result = self.p.store.import_workbook(path)
+        self.assertEqual((result['inserted'], result['duplicates']), (2, 1))
+        a = self.p.store.get(1)
+        self.assertEqual(a['source']['extra'], '=1+1')
+        self.assertEqual(a['source']['free_subscribers'], '1000.0')
+        self.assertEqual(a['confirmed_first_name'], '')
+        self.assertEqual(a['author_publications'], 2)
+        self.assertEqual(self.p.store.import_workbook(path)['inserted'], 0)
+        self.assertEqual(self.p.store.db.execute('SELECT count(*) FROM source_rows').fetchone()[0], 3)
+        self.assertEqual(self.p.store.shortlist(100, 1)['pilot'], 1)
+        self.assertEqual(self.p.store.shortlist(100, 1)['pilot'], 1)
+
+    def test_profile_is_not_publication_and_ids_normalize(self):
+        self.assertTrue(is_profile('https://substack.com/@alreadydawn'))
+        self.assertEqual(publication_url('https://substack.com/@alreadydawn'), '')
+        self.assertEqual(publication_url('https://x.substack.com/'), 'https://x.substack.com')
+        self.assertEqual(identifier('2.70586367E8'), '270586367')
+
+    def test_local_filter_not_subscribers_or_first_post_date(self):
+        self.assertEqual(classify({'name': 'Unknown', 'categories': 'Technology', 'free_subscribers': '10000000', 'first_post_date': now()})[0], FITS[4])
+        self.assertEqual(classify({'hero_text': 'AI agents, LLM, inference and model evaluation'})[0], FITS[0])
+        self.assertEqual(classify({'hero_text': 'Writing on digital minimalism and human agency'})[0], FITS[2])
+
+    def test_pending_claims_and_mock_cannot_approve(self):
+        pid = self.pub(); self.research(pid)
+        p = self.p.generate(pid)
+        self.assertIn('MOCK_PREVIEW_NOT_SEND_READY', p['draft']['review_flags'])
+        self.assertIn('CLAIM_NOT_APPROVED:product.model', p['draft']['review_flags'])
+        with self.assertRaises(ValueError):
+            self.p.action(pid, 'approve', {'reviewer': 'X', 'semantic_review_confirmed': True})
+
+    def test_invalid_excerpt_stops_generation(self):
+        pid = self.pub(); self.research(pid)
+        e = self.p.store.get(pid)['evidence']; e['supporting_excerpt'] = 'Invented statement'
+        self.p.update(pid, {'evidence': e})
+        with self.assertRaisesRegex(ValueError, 'EXCERPT_NOT_IN_SOURCE'):
+            self.p.generate(pid)
+
+    def test_missing_name_uses_neutral_and_missing_contact_blocks(self):
+        pid = self.pub(); self.research(pid)
+        self.p.update(pid, {'confirmed_first_name': '', 'name_source': '', 'contact_route': '', 'contact_source_url': '', 'contact_confirmed': False})
+        p = self.p.generate(pid)
+        self.assertTrue(p['draft']['plain_text_body'].startswith('Hello,'))
+        self.assertIn('CONTACT_UNVERIFIED', p['draft']['review_flags'])
+
+    def test_approval_invalidation_preserves_versions_and_edits(self):
+        pid, p = self.ready()
+        p = self.p.action(pid, 'approve', {'reviewer': 'Human', 'semantic_review_confirmed': True})
+        self.assertEqual(p['draft']['hash'], p['draft']['approved_hash'])
+        old = p['draft']['plain_text_body']
+        edited = old.replace('Your article', 'Your recent article')
+        p = self.p.edit(pid, {'subject': p['draft']['subject'], 'plain_text_body': edited})
+        self.assertEqual(p['draft']['plain_text_body'], edited)
+        self.assertIsNone(p['draft']['approved_hash'])
+        p = self.p.generate(pid)
+        self.assertEqual(p['draft']['plain_text_body'], edited)
+        p = self.p.generate(pid, regenerate=True)
+        self.assertNotEqual(p['draft']['plain_text_body'], edited)
+        self.assertIsNone(p['draft']['approved_hash'])
+        self.assertEqual(self.p.store.db.execute('SELECT count(*) FROM drafts WHERE publication_id=?', (pid,)).fetchone()[0], 4)
+
+    def test_registry_change_invalidates_approval_without_editing_body(self):
+        pid, p = self.ready()
+        p = self.p.action(pid, 'approve', {'reviewer': 'Human', 'semantic_review_confirmed': True})
+        body = p['draft']['plain_text_body']
+        self.facts['entries'][2]['approval_status'] = 'pending'
+        (self.path / 'facts.json').write_text(dumps(self.facts), encoding='utf-8')
+        p = self.p.detail(pid)
+        self.assertIsNone(p['draft']['approved_hash'])
+        self.assertEqual(p['draft']['plain_text_body'], body)
+
+    def test_contact_history_cross_channel_and_dnc(self):
+        a, b = self.pub(), self.pub('Second publication')
+        self.p.action(a, 'history', {'channel': 'Reddit', 'source': 'https://reddit.com/comments/test', 'event': 'Replied'})
+        self.assertEqual(len(self.p.store.get(b)['previous_contact']), 1)
+        with self.assertRaises(ValueError): self.p.generate(b)
+        self.p.action(a, 'dnc', {'reason': 'Requested opt-out'})
+        self.assertTrue(self.p.store.get(b)['do_not_contact'])
+        self.assertEqual(self.p.store.get(b)['status'], 'Do not contact')
+
+    def test_only_one_approved_draft_per_author(self):
+        a, p = self.ready()
+        self.p.action(a, 'approve', {'reviewer': 'X', 'semantic_review_confirmed': True})
+        b = self.pub('Another publication'); self.research(b)
+        p = self.p.generate(b)
+        self.assertIn('AUTHOR_ALREADY_HAS_APPROVED_DRAFT', p['draft']['review_flags'])
+
+    def test_manual_sent_retains_approved_snapshot(self):
+        pid, _ = self.ready()
+        self.p.action(pid, 'approve', {'reviewer': 'X', 'semantic_review_confirmed': True})
+        p = self.p.action(pid, 'sent', {})
+        self.assertEqual(p['status'], 'Sent')
+        self.assertEqual(p['draft']['hash'], p['draft']['approved_hash'])
+        self.assertEqual(len(p['previous_contact']), 1)
+        self.assertEqual(self.p.action(pid, 'replied', {})['status'], 'Replied')
+
+    def test_source_edit_invalidates_approval_but_identical_resume_does_not(self):
+        pid, _ = self.ready()
+        pub = self.p.store.get(pid)
+        article = {k: v for k, v in pub['articles'][0].items() if k != 'id'}
+        self.p.action(pid, 'approve', {'reviewer': 'X', 'semantic_review_confirmed': True})
+        save_articles(self.p.store, self.p.store.get(pid), [article], supplied=True)
+        self.assertIsNotNone(self.p.detail(pid)['draft']['approved_hash'])
+        article['text'] += ' Additional supplied evidence.'
+        save_articles(self.p.store, self.p.store.get(pid), [article], supplied=True)
+        self.assertIsNone(self.p.detail(pid)['draft']['approved_hash'])
+
+    def test_unsupported_claim_launch_and_placeholder(self):
+        pid, p = self.ready()
+        text = p['draft']['plain_text_body'].replace('We can offer API credits', 'Drex Max is released with 99% accuracy. We can offer API credits')
+        p = self.p.edit(pid, {'subject': '[recipient] TODO', 'plain_text_body': text})
+        for f in ('LAUNCH_STATUS_UNCONFIRMED', 'UNSUPPORTED_NUMERIC_CLAIM', 'UNRESOLVED_PLACEHOLDER'):
+            self.assertIn(f, p['draft']['review_flags'])
+
+    def test_html_and_exports_preserve_links_without_scripts_or_formulas(self):
+        pid, p = self.ready()
+        html = html_email('Your post (https://testing.example/p/a)—detail <img src=x onerror=alert(1)>')
+        self.assertIn('href="https://testing.example/p/a"', html)
+        self.assertNotIn('<img', html)
+        self.assertEqual(csv_safe('  =HYPERLINK("x")'), '\'  =HYPERLINK("x")')
+        export = json.loads(self.p.export())
+        self.assertIn('https://testing.example/p/agents', export[0]['email_body'])
+        self.assertIn('https://nace.ai/developers', export[0]['email_body'])
+        self.assertNotIn('OPENAI_API_KEY', self.p.export('csv'))
+
+    def test_fixture_three_variants_never_fetched_or_pilot(self):
+        examples = previews(self.p)
+        self.assertEqual(len(examples), 3)
+        self.assertTrue(all('Alan fixture' in p['label'] for p in examples))
+        self.assertTrue(all(60 <= p['checks']['body_word_count'] <= 90 for p in examples))
+        self.assertTrue(all(not p['checks']['flags'] for p in examples))
+        pid = add_fixture(self.p)
+        self.assertEqual(self.p.store.get(pid)['pilot'], 0)
+        self.assertEqual(self.p.store.get(pid)['articles'][0]['source_kind'], 'user_fixture')
+
+    def test_live_writer_requires_authorization_budget_model_and_key(self):
+        run = Run(self.p.store, self.config, 'test')
+        with self.assertRaisesRegex(ValueError, 'Paid calls require'):
+            OpenAIWriter(self.p.store, self.config, run)
+        self.config.update(allow_paid_calls=True, budget_usd_per_run=1, model='test')
+        with patch.dict('os.environ', {}, clear=True):
+            with self.assertRaisesRegex(ValueError, 'OPENAI_API_KEY'):
+                OpenAIWriter(self.p.store, self.config, run)
+
+    def test_model_only_receives_selected_approved_evidence(self):
+        pid = self.pub(); self.research(pid)
+        pub = self.p.store.get(pid); pub['source'] = {'secret_note': 'do not pass'}
+        facts, _ = self.p.facts()
+        payload = writing_input(pub, pub['evidence'], facts, self.config['sender'])
+        self.assertEqual(payload['approved_facts'], [])
+        self.assertNotIn('do not pass', dumps(payload))
+        self.assertNotIn('research', payload)
+        self.assertNotIn('review_flags', payload)
+
+    def test_one_revision_only_for_failing_email(self):
+        pid = self.pub(); self.research(pid)
+        original = MockWriter.generate
+        calls = []
+        def bad(writer, payload, evidence, revision=None):
+            calls.append(revision)
+            d = original(writer, payload, evidence, revision)
+            d['subject'] = '[recipient]'
+            return d
+        with patch.object(MockWriter, 'generate', bad):
+            p = self.p.generate(pid)
+        self.assertEqual(len(calls), 2)
+        self.assertIsNone(calls[0])
+        self.assertIsNotNone(calls[1])
+        self.assertIn('UNRESOLVED_PLACEHOLDER', p['draft']['review_flags'])
+
+    def test_request_and_spending_caps_are_persisted(self):
+        self.config.update(max_requests_per_run=1, budget_usd_per_run=.1)
+        run = Run(self.p.store, self.config, 'test')
+        with self.assertRaises(ValueError): run.request(.11)
+        run.request(.05)
+        with self.assertRaises(ValueError): run.request(.01)
+        self.assertEqual(self.p.store.db.execute('SELECT requests FROM runs WHERE id=?', (run.id,)).fetchone()[0], 1)
+
+    def test_network_off_and_permissions_checked_before_fetch(self):
+        pid = self.pub()
+        run = Run(self.p.store, self.config, 'test')
+        with patch('urllib.request.OpenerDirector.open') as fetch:
+            with self.assertRaisesRegex(ValueError, 'NETWORK_DISABLED'):
+                Collector(self.p.store, self.config, run).collect(self.p.store.get(pid))
+            self.config['network_enabled'] = True
+            with self.assertRaisesRegex(ValueError, 'SOURCE_PERMISSION_REQUIRED'):
+                Collector(self.p.store, self.config, run).collect(self.p.store.get(pid))
+            fetch.assert_not_called()
+
+    def test_rss_and_atom_parsing_and_incomplete_content(self):
+        rss = b'<rss xmlns:content="http://purl.org/rss/1.0/modules/content/"><channel><item><title>Old</title><link>https://x.example/old</link><pubDate>Tue, 01 Sep 2026 12:00:00 GMT</pubDate><description>Old excerpt</description></item><item><title>New</title><link>https://x.example/new</link><pubDate>Thu, 01 Oct 2026 12:00:00 GMT</pubDate><content:encoded>&lt;p&gt;Available text&lt;/p&gt;</content:encoded></item></channel></rss>'
+        rows = parse_feed(rss, 'https://x.example/feed', 1)
+        self.assertEqual(rows[0]['title'], 'New')
+        self.assertEqual(rows[0]['content_status'], 'excerpt')
+        self.assertEqual(rows[0]['text'], 'Available text')
+        atom = b'<feed xmlns="http://www.w3.org/2005/Atom"><entry><title>A</title><link href="https://x.example/a"/><summary>Partial</summary><author><name>Sam</name></author></entry></feed>'
+        self.assertEqual(parse_feed(atom, 'https://x.example/feed')[0]['byline'], 'Sam')
+        with self.assertRaises(ValueError): parse_feed(b'<!DOCTYPE a><rss/>', 'https://x.example/feed')
+
+    def test_private_network_and_api_urls_rejected(self):
+        with self.assertRaises(ValueError): public_https('https://127.0.0.1/private')
+        with self.assertRaises(ValueError): public_https('https://x.substack.com/api/v1/posts')
+        with self.assertRaises(ValueError): public_https('https://substack.com/@someone')
+
+    def test_style_count_required_links_and_hard_max(self):
+        pid, p = self.ready()
+        d = p['draft']; e = d['evidence_record']
+        text = d['plain_text_body']
+        count = style_checks(text, d['subject'], e, d['sender'])['body_word_count']
+        self.assertTrue(60 <= count <= 90)
+        text = text.replace('\n\nExplore Drex:', ' ' + 'word ' * 120 + '\n\nExplore Drex:')
+        self.assertIn('BODY_EXCEEDS_110_WORD_HARD_MAX', style_checks(text, '', e, d['sender'])['flags'])
+        text = d['plain_text_body'].replace('https://nace.ai/developers', '[link]')
+        flags = style_checks(text, '', e, d['sender'])['flags']
+        self.assertIn('DEVELOPER_LINK_REQUIRED_AFTER_BODY', flags)
+        self.assertIn('UNRESOLVED_PLACEHOLDER', flags)
+
+    def test_edited_article_detail_still_checked(self):
+        pid, p = self.ready()
+        d = p['draft']
+        text = d['plain_text_body'].replace(d['evidence_record']['email_detail'], 'an invented audience preference')
+        p = self.p.edit(pid, {'subject': d['subject'], 'plain_text_body': text})
+        self.assertIn('ARTICLE_DETAIL_NOT_SUPPORTED', p['draft']['review_flags'])
+
+    def test_live_adapter_request_shape_usage_and_cache_without_network(self):
+        pid = self.pub(); self.research(pid); self.approve_facts()
+        self.config.update(provider='openai', model='test-model', allow_paid_calls=True,
+                           budget_usd_per_run=1, input_usd_per_million=1, output_usd_per_million=2)
+        pub = self.p.store.get(pid); facts, _ = self.p.facts()
+        payload = writing_input(pub, pub['evidence'], facts, self.config['sender'])
+        output = MockWriter().generate(payload, pub['evidence'])
+        response = {'status': 'completed', 'id': 'test-response', 'model': 'test-model',
+                    'usage': {'input_tokens': 100, 'output_tokens': 200},
+                    'output': [{'type': 'message', 'content': [{'type': 'output_text', 'text': dumps(output)}]}]}
+        run = Run(self.p.store, self.config, 'test')
+        class FakeResponse(io.BytesIO):
+            pass
+        with patch.dict('os.environ', {'OPENAI_API_KEY': 'test-not-real'}), patch('urllib.request.OpenerDirector.open', return_value=FakeResponse(dumps(response).encode())) as call:
+            writer = OpenAIWriter(self.p.store, self.config, run)
+            result = writer.generate(payload, pub['evidence'])
+            self.assertEqual(result['subject'], output['subject'])
+            request = call.call_args[0][0]
+            body = json.loads(request.data)
+            self.assertFalse(body['store'])
+            self.assertTrue(body['text']['format']['strict'])
+            self.assertNotIn('tools', body)
+            self.assertNotIn('test-not-real', request.data.decode())
+            writer.generate(payload, pub['evidence'])
+            self.assertEqual(call.call_count, 1)
+        self.assertEqual(run.requests, 1)
+        self.assertEqual(run.usage[0]['usage']['input_tokens'], 100)
+        self.assertIsNone(run.usage[0]['actual_cost_usd'])
+        self.assertAlmostEqual(run.usage[0]['estimated_cost_usd'], .0005)
+
+    def test_feed_cache_only_keeps_selected_articles(self):
+        pid = self.pub()
+        self.config['network_enabled'] = True
+        self.p.update(pid, {'research': {'source_kind': 'publisher_rss', 'automated_use_permitted': True,
+            'permission_basis': 'Explicit test permission', 'permission_source_url': 'https://testing.example/terms',
+            'permission_review_date': '2999-01-01', 'feed_url': 'https://testing.example/feed'}})
+        rss = ('<rss><channel>' + ''.join(f'<item><title>Article {n}</title><link>https://testing.example/p/{n}</link><description>Text {n}</description></item>' for n in range(10)) + '</channel></rss>').encode()
+        run = Run(self.p.store, self.config, 'test')
+        collector = Collector(self.p.store, self.config, run)
+        with patch.object(collector, 'allowed_get', return_value=rss) as fetch:
+            self.assertEqual(len(collector.collect(self.p.store.get(pid))), 5)
+            self.assertEqual(len(collector.collect(self.p.store.get(pid))), 5)
+            self.assertEqual(fetch.call_count, 1)
+        cached = self.p.store.db.execute("SELECT data FROM cache WHERE key LIKE 'rss:%'").fetchone()[0]
+        self.assertNotIn('Article 9', cached)
+
+    def test_unsupported_api_derived_research_rejected(self):
+        pid = self.pub()
+        with self.assertRaisesRegex(ValueError, 'API-derived'):
+            save_articles(self.p.store, self.p.store.get(pid), [{'url': 'https://testing.example/post', 'text': 'Text', 'source_kind': 'substack_api', 'permission_basis': 'Unknown'}], supplied=True)
+
+    def test_generation_dependency_does_not_erase_completed_research(self):
+        pid = self.pub(); self.research(pid)
+        self.config['provider'] = 'openai'
+        self.p.process(20)
+        pub = self.p.store.get(pid)
+        self.assertEqual(pub['status'], 'Researched')
+        self.assertIn('Paid calls require', pub['draft_error'])
+        self.assertEqual(len(pub['articles']), 1)
+        self.assertEqual(self.p.store.metrics()['generation_failed_attempts'], 1)
+        self.assertEqual(self.p.store.metrics()['research_failed_attempts'], 0)
+
+
+if __name__ == '__main__':
+    unittest.main()

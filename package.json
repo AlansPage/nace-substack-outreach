@@ -1,0 +1,9 @@
+{
+  "name": "substack-outreach",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "python build.py",
+    "test": "node --test tests/*.test.mjs"
+  }
+}

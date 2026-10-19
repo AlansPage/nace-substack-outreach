@@ -1,0 +1,21 @@
+{
+  "input_path": null,
+  "database": ".local/substack/outreach.sqlite3",
+  "registry_path": "substack_outreach/facts.example.json",
+  "shortlist_size": 100,
+  "batch_size": 20,
+  "max_articles": 5,
+  "cache_hours": 24,
+  "network_enabled": false,
+  "max_requests_per_run": 30,
+  "max_retries": 2,
+  "request_interval_seconds": 2,
+  "provider": "mock",
+  "model": "",
+  "allow_paid_calls": false,
+  "budget_usd_per_run": 0,
+  "input_usd_per_million": null,
+  "output_usd_per_million": null,
+  "max_output_tokens": 1800,
+  "sender": {"name": "Your Name", "company": "Nace AI", "email": "you@example.com"}
+}
