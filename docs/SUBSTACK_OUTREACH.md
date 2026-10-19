@@ -1,21 +1,21 @@
 # Local Substack research and outreach
 
-This workspace preserves the Reddit map and its browser-local outreach queue. The new **Substack outreach** tab talks only to a loopback Python worker. SQLite, imported sources, drafts, exports and keys stay outside `public/`. There is no sending endpoint, scheduled sender or Vercel database. Automatic Vercel deployments are disabled specifically for `alan/substack-outreach` so the branch can be reviewed on GitHub without publishing it.
+The browser workspace talks only to a loopback Python worker. SQLite, imported sources, drafts, exports and keys stay outside `public/`. There is no sending endpoint, scheduled sender or hosted database; nothing in this repository is deployed anywhere.
 
 ## Install and run in PowerShell
 
 Python 3.12+ and Node 18+ are sufficient. The worker and static build use the Python standard library; no pip packages, model SDK, API key or npm installation are needed for local operation. Node is needed only for the existing JavaScript tests.
 
 ```powershell
-Set-Location 'C:\Users\alant\Downloads\nace-substack-outreach'
+Set-Location 'C:\path\to\substack-outreach'
 py -3.12 -m venv .venv-substack
 Copy-Item .\substack_outreach\config.example.json .\substack.config.json
-.\.venv-substack\Scripts\python.exe -X utf8 build.py
-.\.venv-substack\Scripts\python.exe -X utf8 -m substack_outreach --config .\substack.config.json pilot --input '.\All channels .xlsx' --batch 20 --shortlist 100
-.\.venv-substack\Scripts\python.exe -X utf8 -m substack_outreach --config .\substack.config.json serve
+.\.venv-substack\Scripts\python.exe build.py
+.\.venv-substack\Scripts\python.exe -m substack_outreach --config .\substack.config.json pilot --input '.\All channels .xlsx' --batch 20 --shortlist 100
+.\.venv-substack\Scripts\python.exe -m substack_outreach --config .\substack.config.json serve
 ```
 
-Open **http://127.0.0.1:8765/#substack** in your browser. Stop the worker with Ctrl+C. Do not overwrite an existing local config when repeating these commands. Activation is unnecessary; all commands use the venv executable directly. Without a venv, replace it with `py -3.12`.
+Open **http://127.0.0.1:8765/** in your browser. Stop the worker with Ctrl+C. Do not overwrite an existing local config when repeating these commands. Activation is unnecessary; all commands use the venv executable directly. Without a venv, replace it with `py -3.12`.
 
 The importer searches `All channels (1).xlsx`, `All channels .xlsx` and `All channels.xlsx`, in that order. Set `input_path` in the local config or pass `--input` for a different location. Paths in the config are relative to the repository working directory. The supplied workbook has 15,617 data rows and these actual headers:
 
@@ -44,8 +44,8 @@ The interface includes the complete status vocabulary: Imported, Shortlisted, Ne
 Research JSON is imported in the UI or with:
 
 ```powershell
-py -3.12 -X utf8 -m substack_outreach --config .\substack.config.json research-import .\.local\research.json
-py -3.12 -X utf8 -m substack_outreach --config .\substack.config.json process --batch 20
+py -3.12 -m substack_outreach --config .\substack.config.json research-import .\.local\research.json
+py -3.12 -m substack_outreach --config .\substack.config.json process --batch 20
 ```
 
 Example `.local/research.json` (replace all example values with supplied evidence; this is not research of an actual publication):
@@ -91,7 +91,7 @@ RSS existence is **not permission**. Record publisher terms, a licence or explic
 Save this through the UI or `update PUBLICATION_ID .local/permission.json`. Set `network_enabled: true` in your local config, then:
 
 ```powershell
-py -3.12 -X utf8 -m substack_outreach --config .\substack.config.json process --collect --batch 20
+py -3.12 -m substack_outreach --config .\substack.config.json process --collect --batch 20
 ```
 
 For a supported `*.substack.com` publication, `/feed` is a candidate verified by RSS parsing. Custom domains use publisher-linked RSS/Atom discovery or an explicitly supplied feed. Cross-domain feeds/redirects require separate review and manual import in this version. The collector checks robots rules, rate limits, public HTTPS destinations and permission expiry. Missing/unavailable robots rules fail closed. HTTP 401/403/429 and redirects stop collection; bounded retries apply only to transient failures. No article-page scraper is included. Up to five recent accessible feed items are sorted by dates; unknown dates remain unknown. Parsed selected excerpts and robots rules are cached; whole feeds/pages are not persisted. Existing articles are reused on resume; deliberate refresh can be supplied through research import.
@@ -135,30 +135,30 @@ $substackKey = Read-Host 'OpenAI API key' -AsSecureString
 $substackPtr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($substackKey)
 try { $env:OPENAI_API_KEY = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($substackPtr) }
 finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($substackPtr) }
-py -3.12 -X utf8 -m substack_outreach --config .\substack.config.json serve
+py -3.12 -m substack_outreach --config .\substack.config.json serve
 Remove-Item Env:\OPENAI_API_KEY
 ```
 
-To use Alan or another sender, set that person's confirmed name and actual email together in `sender`; no title/email is inferred. Restart the worker after config changes. The existing Drex classifier adapter remains untouched and is not a writing dependency.
+To change the sender, set that person's confirmed name and actual email together in `sender`; no title/email is inferred. Restart the worker after config changes. The existing Drex classifier adapter remains untouched and is not a writing dependency.
 
 ## Shared contact history
 
 Author IDs and explicit profile links group publications. An explicit contact route or manually supplied identity alias can connect records. Approval is blocked when that author/contact already has an approved draft, any recorded previous contact, or an opt-out. Suppression applies across linked publications.
 
-Existing Reddit state remains in `smap.outreach.v1` and is never overwritten. This worker cannot know that two different handles on different channels are the same person without a user-supplied mapping. Use **Previous contact & shared history**, or import a JSON list with `publication_id`, `channel`, `event`, `source`, and optional `at`, `note`, `identity_alias`. Do this before approving a contact researched through another channel. It imports historical records, not messages:
+This worker cannot know that two different handles on different channels are the same person without a user-supplied mapping. Use **Previous contact & shared history**, or import a JSON list with `publication_id`, `channel`, `event`, `source`, and optional `at`, `note`, `identity_alias`. Do this before approving a contact researched through another channel. It imports historical records, not messages:
 
 ```powershell
-py -3.12 -X utf8 -m substack_outreach --config .\substack.config.json contact-import .\.local\contact-history.json
+py -3.12 -m substack_outreach --config .\substack.config.json contact-import .\.local\contact-history.json
 ```
 
 ## Exports, fixtures and observability
 
 ```powershell
-py -3.12 -X utf8 -m substack_outreach --config .\substack.config.json export --format csv --scope pilot --out .\.local\pilot.csv
-py -3.12 -X utf8 -m substack_outreach --config .\substack.config.json export --format json --scope pilot --out .\.local\pilot.json
-py -3.12 -X utf8 -m substack_outreach --config .\substack.config.json metrics
-py -3.12 -X utf8 -m substack_outreach --config .\substack.config.json fixture
-py -3.12 -X utf8 -m substack_outreach --config .\substack.config.json previews
+py -3.12 -m substack_outreach --config .\substack.config.json export --format csv --scope pilot --out .\.local\pilot.csv
+py -3.12 -m substack_outreach --config .\substack.config.json export --format json --scope pilot --out .\.local\pilot.json
+py -3.12 -m substack_outreach --config .\substack.config.json metrics
+py -3.12 -m substack_outreach --config .\substack.config.json fixture
+py -3.12 -m substack_outreach --config .\substack.config.json previews
 ```
 
 Exports contain publication, author, publication URL, article URL, excerpt, angle, contact and source, subject/body, owner, status and flags. CSV values are guarded against formula injection. Draft records include safe HTML and exact evidence/claim snapshots. Do not export private data into `public/`; the CLI rejects it.
@@ -170,12 +170,12 @@ Metrics report imported/shortlisted publications, research completion and failed
 ## Validation and limits
 
 ```powershell
-py -3.12 -X utf8 -m unittest discover -s tests -p test_substack.py -v
+py -3.12 -m unittest discover -s tests -p test_substack.py -v
 npm test
-py -3.12 -X utf8 build.py
+py -3.12 build.py
 git diff --check
 ```
 
-The pilot ran locally with 15,617 source rows, 100 shortlisted publications and a 20-publication pilot. No live publisher retrieval or paid model calls were made; the 20 records need permitted article research. Tests cover mapping/deduplication, profiles, missing identity/contact data, RSS/Atom excerpts, resume, evidence and claim failures, approval/version changes, cross-channel history, suppression, exports, safe links/rendering, body length, one-revision limits and the existing Reddit/auth code. Two pre-existing radar-file tests skip when their original data files are absent.
+The pilot ran locally with 15,617 source rows, 100 shortlisted publications and a 20-publication pilot. No live publisher retrieval or paid model calls were made; the 20 records need permitted article research. Tests cover mapping/deduplication, profiles, missing identity/contact data, RSS/Atom excerpts, resume, evidence and claim failures, approval/version changes, cross-channel history, suppression, exports, safe links/rendering, body length, one-revision limits, and the standalone page shell.
 
-Semantic correctness, source permissions, public identity, whether a paraphrase is fair, and outreach suitability still require human review. Official API schemas were checked, but live model access/pricing and real publisher feeds have not been exercised. The worker is for one trusted local operator: loopback binding, Host/Origin checks, no CORS and a per-session mutation token; it is not an Internet-facing multi-user service. SQLite persistence on Vercel is not assumed. Static builds remain independent of the worker/database/API key.
+Semantic correctness, source permissions, public identity, whether a paraphrase is fair, and outreach suitability still require human review. Official API schemas were checked, but live model access/pricing and real publisher feeds have not been exercised. The worker is for one trusted local operator: loopback binding, Host/Origin checks, no CORS and a per-session mutation token; it is not an Internet-facing multi-user service. Static builds remain independent of the worker/database/API key.

@@ -4,7 +4,7 @@ import re
 import xml.etree.ElementTree as ET
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from zipfile import ZipFile
+from zipfile import BadZipFile, ZipFile
 
 NS = {"s": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
 EXPECTED = {"name", "author_name", "author_handle", "url", "substack_profile", "categories",
@@ -35,6 +35,15 @@ def identifier(value):
 
 
 def read_workbook(path, sheet_name="substack"):
+    try:
+        return _read_workbook(path, sheet_name)
+    except (BadZipFile, KeyError, IndexError, StopIteration, ET.ParseError) as exc:
+        # Structural damage, not a mapping problem: say so instead of leaking a traceback.
+        raise ValueError(f"Workbook is not a readable .xlsx ({type(exc).__name__}: {exc}). "
+                         "Export the sheet again from Excel or Google Sheets.") from None
+
+
+def _read_workbook(path, sheet_name):
     with ZipFile(path) as z:
         if any(i.file_size > 150_000_000 for i in z.infolist()):
             raise ValueError("Workbook member exceeds the 150 MB safety limit")

@@ -70,7 +70,7 @@ def serve(config, port=8765):
                 static = {"/": ROOT / "public/index.html", "/index.html": ROOT / "public/index.html"}
                 if u.path in static and static[u.path].is_file():
                     return self.send(static[u.path].read_bytes(), content_type="text/html; charset=utf-8")
-                return self.send({"error": "Not found. Run py -3.12 -X utf8 build.py first."}, 404)
+                return self.send({"error": "Not found. Run python build.py first."}, 404)
             except (ValueError, KeyError, OSError) as exc:
                 return self.send({"error": str(exc)}, 400)
 
@@ -89,7 +89,7 @@ def serve(config, port=8765):
             except (ValueError, KeyError, TypeError, OSError) as exc:
                 return self.send({"error": str(exc)}, 400)
 
-    print(f"Local review: http://127.0.0.1:{port}/#substack", flush=True)
+    print(f"Local review: http://127.0.0.1:{port}/", flush=True)
     print("SQLite and keys stay in the local worker. Ctrl+C stops the server.", flush=True)
     server = HTTPServer(("127.0.0.1", port), Handler)
     try:

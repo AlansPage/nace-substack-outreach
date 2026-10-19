@@ -38,7 +38,7 @@
     if (boot) return;
     skeleton();
     if (!['localhost', '127.0.0.1'].includes(location.hostname)) {
-      notice('The Substack queue is private local data. Run py -3.12 -X utf8 -m substack_outreach serve, then open http://127.0.0.1:8765/#substack. The Reddit workspace remains available here.');
+      notice('This page only works when served by the local worker. Run python -m substack_outreach serve, then open http://127.0.0.1:8765/.');
       return;
     }
     try {
@@ -51,7 +51,7 @@
       $('#ss-search').addEventListener('keydown', e => { if (e.key === 'Enter') { offset = 0; refresh().catch(report); } });
       await refresh();
       notice(`Local worker connected · ${boot.provider === 'mock' ? 'MOCK mode: previews cannot be approved' : 'Writing provider: ' + boot.provider} · Sender: ${boot.sender.name}, ${boot.sender.email} · Network ${boot.network_enabled ? 'permission-gated' : 'disabled'}`);
-    } catch (error) { boot = null; notice(`Local worker unavailable. Run py -3.12 -X utf8 -m substack_outreach serve. ${error.message}`, true); }
+    } catch (error) { boot = null; notice(`Local worker unavailable. Run python -m substack_outreach serve. ${error.message}`, true); }
   }
   const report = error => notice(error.message || String(error), true);
   async function refresh() {

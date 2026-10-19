@@ -384,5 +384,80 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(self.p.store.metrics()['research_failed_attempts'], 0)
 
 
+
+class WorkbookErrorTests(unittest.TestCase):
+    """Structurally broken .xlsx files must fail as one ValueError, never a raw traceback."""
+    NS = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.path = Path(self.temp.name)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def zip(self, name, members):
+        p = self.path / name
+        with ZipFile(p, 'w') as z:
+            for member, body in members.items():
+                z.writestr(member, body)
+        return p
+
+    def book(self, rel_target='worksheets/sheet1.xml'):
+        return {'xl/workbook.xml': f'<workbook xmlns="{self.NS}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="substack" r:id="rId1"/></sheets></workbook>',
+                'xl/_rels/workbook.xml.rels': f'<Relationships><Relationship Id="rId1" Target="{rel_target}"/></Relationships>'}
+
+    def assert_readable_error(self, p):
+        with self.assertRaises(ValueError) as ctx:
+            read_workbook(p)
+        self.assertIn('not a readable .xlsx', str(ctx.exception))
+
+    def test_not_a_zip(self):
+        p = self.path / 'plain.xlsx'
+        p.write_bytes(b'hello')
+        self.assert_readable_error(p)
+
+    def test_missing_sheet_relationship(self):
+        members = self.book()
+        members['xl/_rels/workbook.xml.rels'] = '<Relationships></Relationships>'
+        self.assert_readable_error(self.zip('norel.xlsx', members))
+
+    def test_shared_string_index_out_of_range(self):
+        members = self.book()
+        members['xl/sharedStrings.xml'] = f'<sst xmlns="{self.NS}"><si><t>name</t></si></sst>'
+        members['xl/worksheets/sheet1.xml'] = f'<worksheet xmlns="{self.NS}"><sheetData><row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>7</v></c></row></sheetData></worksheet>'
+        self.assert_readable_error(self.zip('badstr.xlsx', members))
+
+    def test_mapping_errors_keep_their_specific_message(self):
+        members = self.book()
+        members['xl/worksheets/sheet1.xml'] = f'<worksheet xmlns="{self.NS}"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>name</t></is></c><c r="B1" t="inlineStr"><is><t>name</t></is></c></row></sheetData></worksheet>'
+        with self.assertRaises(ValueError) as ctx:
+            read_workbook(self.zip('dup.xlsx', members))
+        self.assertIn('Duplicate workbook headers', str(ctx.exception))
+
+
+class CliConfigErrorTests(unittest.TestCase):
+    """A bad --config must produce a one-line Error and exit 2, not a stack trace."""
+
+    def run_cli(self, *args):
+        import subprocess, sys
+        return subprocess.run([sys.executable, '-m', 'substack_outreach', *args], cwd=ROOT, capture_output=True, text=True, encoding='utf-8')
+
+    def test_missing_config_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            r = self.run_cli('--config', str(Path(d) / 'nope.json'), 'metrics')
+        self.assertEqual(r.returncode, 2)
+        self.assertTrue(r.stderr.startswith('Error: config file not found'), r.stderr)
+        self.assertNotIn('Traceback', r.stderr)
+
+    def test_invalid_json_config(self):
+        with tempfile.TemporaryDirectory() as d:
+            bad = Path(d) / 'bad.json'
+            bad.write_text('{bad', encoding='utf-8')
+            r = self.run_cli('--config', str(bad), 'metrics')
+        self.assertEqual(r.returncode, 2)
+        self.assertTrue(r.stderr.startswith('Error: config is not valid JSON'), r.stderr)
+        self.assertNotIn('Traceback', r.stderr)
+
 if __name__ == '__main__':
     unittest.main()

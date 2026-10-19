@@ -1,5 +1,6 @@
 import argparse
 import json
+import sys
 from pathlib import Path
 
 from .config import load_config
@@ -43,7 +44,17 @@ def main():
     p = subs.add_parser("previews")
     p.add_argument("--out", default=".local/substack/fixture-previews.json")
     args = parser.parse_args()
-    config = load_config(args.config)
+    # Results are printed as UTF-8 JSON whatever the console or redirect target uses.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+    try:
+        config = load_config(args.config)
+    except FileNotFoundError:
+        parser.exit(2, f"Error: config file not found: {args.config}\n")
+    except json.JSONDecodeError as exc:
+        parser.exit(2, f"Error: config is not valid JSON ({exc})\n")
+    except (ValueError, OSError) as exc:
+        parser.exit(2, f"Error: {exc}\n")
     if getattr(args, "batch", None) is not None and args.batch <= 0:
         parser.error("--batch must be positive")
     if getattr(args, "shortlist", None) is not None and args.shortlist <= 0:
