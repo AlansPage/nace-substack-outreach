@@ -23,8 +23,10 @@ def offers_for(ask_format, offer_ids):
     return [cid for cid in offer_ids if cid != SPONSORSHIP_OFFER]
 
 
-def registry(store, path):
-    data = json.loads(Path(path).read_text(encoding="utf-8-sig"))
+REGISTRY_IN_DATABASE = "database"
+
+
+def check_registry(data):
     required = {"id", "text", "source", "approval_status", "approved_by", "approved_at", "scope", "expiry_or_review_date"}
     if not isinstance(data.get("version"), int) or data.get("launch_status") not in ("unconfirmed", "scheduled_confirmed", "released_confirmed"):
         raise ValueError("Registry requires integer version and an explicit launch_status")
@@ -35,6 +37,30 @@ def registry(store, path):
         if e["approval_status"] == "approved" and not (e["approved_by"] and e["approved_at"]):
             raise ValueError("Approved registry entries require approved_by and approved_at")
         ids.add(e["id"])
+    return data
+
+
+def push_registry(store, data, pushed_by):
+    """Store a validated registry in the shared database. Approval fields are stored exactly as given."""
+    check_registry(data)
+    h = digest(data)
+    with store.db:
+        # Re-pushing identical content makes it the current registry again.
+        store.db.execute("DELETE FROM facts_registry WHERE hash=?", (h,))
+        store.db.execute("INSERT INTO facts_registry VALUES(?,?,?,?,?)", (h, data["version"], dumps(data), now(), pushed_by))
+    return {"hash": h, "version": data["version"], "entries": len(data["entries"]),
+            "approved": sum(1 for e in data["entries"] if e["approval_status"] == "approved")}
+
+
+def registry(store, path):
+    if path == REGISTRY_IN_DATABASE:
+        row = store.db.execute("SELECT data FROM facts_registry ORDER BY pushed_at DESC, version DESC LIMIT 1").fetchone()
+        if row is None:
+            raise ValueError("No facts registry in the database yet; run facts-push with your facts.json")
+        data = json.loads(row["data"])
+    else:
+        data = json.loads(Path(path).read_text(encoding="utf-8-sig"))
+    check_registry(data)
     h = digest(data)
     store.db.execute("INSERT OR IGNORE INTO registry_history VALUES(?,?,?,?)", (h, data["version"], dumps(data), now()))
     # A change to facts, approval, expiry or launch status invalidates earlier approvals.

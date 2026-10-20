@@ -17,9 +17,9 @@ from .workbook import find_workbook
 
 
 class Pipeline:
-    def __init__(self, config):
+    def __init__(self, config, actor=None):
         self.config = config
-        self.store = Store(config["database"])
+        self.store = Store(config["database"], actor)
 
     def facts(self):
         return registry(self.store, self.config["registry_path"])

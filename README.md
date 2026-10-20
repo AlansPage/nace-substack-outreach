@@ -53,6 +53,7 @@ py -3.12 -m substack_outreach --config .\substack.config.json collect-contacts -
 py -3.12 -m substack_outreach --config .\substack.config.json contacts-import .\.local\substack-replyto.json   # Gmail reply-to export
 py -3.12 -m substack_outreach --config .\substack.config.json export --format csv --scope pilot --out .\.local\pilot.csv
 py -3.12 -m substack_outreach --config .\substack.config.json export --format sendsheet --out .\.local\sendsheet.html   # approved drafts only
+py -3.12 -m substack_outreach --config .\.local\hosted.config.json facts-push .\substack_outreach\facts.json   # hosted shared database only
 py -3.12 -m substack_outreach --config .\substack.config.json metrics
 ```
 
@@ -70,6 +71,21 @@ each one in the UI before approval is possible. The send sheet only fills your m
 | `local_base_url` | `http://127.0.0.1:11434` | Loopback-only OpenAI-compatible endpoint for `provider: "local"` (for example Ollama) |
 
 See [`docs/SUBSTACK_OUTREACH.md`](docs/SUBSTACK_OUTREACH.md) for each one.
+
+## Hosted team workspace (optional)
+
+The same code deploys to Vercel for a shared workspace: Google sign-in, a Neon Postgres database
+(`pg8000` is the only package, used only in hosted mode), and private inputs pushed from your machine
+with `facts-push` and `pilot`. **Sign-in is open to any Google account unless you set
+`ALLOWED_EMAIL_DOMAIN` or `ALLOWED_EMAILS`**, and everyone signed in can read facts and contact routes.
+Setup steps are in [`docs/SUBSTACK_OUTREACH.md`](docs/SUBSTACK_OUTREACH.md#hosted-team-workspace-vercel).
+
+| Hosted piece | Location |
+|---|---|
+| Vercel function | `api/index.py` → `substack_outreach/hosted.py` |
+| Google sign-in and sessions | `substack_outreach/auth.py` |
+| SQLite / Postgres storage | `substack_outreach/db.py` |
+| Build and routing | `vercel.json`, `requirements.txt`, `.python-version`, `.vercelignore` |
 
 ## The facts registry
 

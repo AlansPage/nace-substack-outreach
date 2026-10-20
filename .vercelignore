@@ -1,0 +1,19 @@
+# Never upload private inputs or local state, even on a CLI deploy from this folder.
+.local/
+*.xlsx
+*.xls
+*.csv
+All channels*
+*.sqlite3
+*.sqlite3-*
+substack.config.json
+substack_outreach/facts.json
+substack_outreach/dnc.json
+.env*
+*.env
+.venv*/
+# Not needed by the build or the function.
+tests/
+scripts/
+docs/
+node_modules/

@@ -1,6 +1,6 @@
 # Local Substack research and outreach
 
-The browser workspace talks only to a loopback Python worker. SQLite, imported sources, drafts, exports and keys stay outside `public/`. There is no sending endpoint, scheduled sender or hosted database; nothing in this repository is deployed anywhere.
+The browser workspace talks only to a loopback Python worker. SQLite, imported sources, drafts, exports and keys stay outside `public/`. There is no sending endpoint or scheduled sender. By default nothing is deployed anywhere; the optional hosted team workspace (see **Hosted team workspace**) runs the same code on Vercel with a shared Postgres database.
 
 ## Install and run in PowerShell
 
@@ -249,6 +249,71 @@ Exports contain publication, author, publication URL, article URL, excerpt, angl
 `previews` writes `.local/substack/fixture-previews.json` and a clickable HTML companion. All three variants use **the same Alan example** and only the user-supplied summary, never fetched text or invented recipients. The article title is a supplied description, the date/contact/publication domain remain unknown, and the fit remains exploratory. The fixture cannot be approved. Generating the preview artifact does not overwrite any edited draft. Select **All imported + fixture** and search `user-supplied fixture` to review it in the UI.
 
 Metrics report imported/shortlisted publications, research completion and failed attempts, draft versions, currently approved drafts, skip reasons and recent run usage. A fixture contributes one publication to overall counts but zero pilot records. No costs, sends, replies or conversion outcomes are fabricated.
+
+## Hosted team workspace (Vercel)
+
+The same workspace can run on Vercel so teammates share one database. Hosted mode uses Postgres (Neon from the Vercel Marketplace) through the pure-Python `pg8000` driver, the only package in `requirements.txt`; the local worker still needs no packages. Nothing sends email in either mode.
+
+**Who can see what.** Sign-in is open to any Google account unless you restrict it. Everyone who signs in can read the facts registry (including unreleased numbers and launch timing), every contact route and draft, and can approve drafts and record sends. Every action is recorded with the signed-in email in `events.actor`. Set `ALLOWED_EMAIL_DOMAIN=nace.ai` (checked against Google's `hd` claim) or `ALLOWED_EMAILS=a@nace.ai,b@nace.ai` to restrict sign-in; no code change is needed.
+
+### 1. Create the project and database
+
+1. On vercel.com: **Add New → Project**, import `AlansPage/nace-substack-outreach`. `vercel.json` sets the build (`python3 build.py`, output `public/`) and sends every `/api/*` request to `api/index.py` with a 300-second limit.
+2. In the project: **Storage → Marketplace → Neon → Connect**. Vercel adds `DATABASE_URL` to the project's environment variables. The tables are created on first use.
+
+### 2. Create the Google sign-in client
+
+In Google Cloud Console → **APIs & Services**:
+
+1. **OAuth consent screen**: user type **External**, scopes `openid` and `email`. While the app is in *Testing*, only listed test users can sign in; **Publish app** to let any Google account in (these two scopes need no Google verification).
+2. **Credentials → Create credentials → OAuth client ID → Web application**. Authorized redirect URI: `https://YOUR-APP.vercel.app/api/auth/callback` (your production domain).
+
+### 3. Set the environment variables
+
+In Vercel → **Settings → Environment Variables** (Production and Preview):
+
+| Variable | Value |
+|---|---|
+| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | From step 2 |
+| `SESSION_SECRET` | 32+ random characters, generated below; changing it signs everyone out |
+| `APP_ORIGIN` | `https://YOUR-APP.vercel.app` (no trailing slash); POST requests from any other origin are refused |
+| `SUBSTACK_CONFIG` | One-line JSON with your settings, e.g. `{"sender": {"name": "Your Name", "company": "Nace AI", "email": "you@nace.ai"}, "batch_size": 20, "network_enabled": true, "collect_contacts": true}` |
+| `OPENAI_API_KEY` | Optional, only with `provider: "openai"` in `SUBSTACK_CONFIG` |
+| `ALLOWED_EMAIL_DOMAIN` / `ALLOWED_EMAILS` | Optional sign-in restriction |
+
+```powershell
+py -3.12 -c "import secrets; print(secrets.token_urlsafe(48))"
+```
+
+`database` and `registry_path` cannot be set in `SUBSTACK_CONFIG`: hosted mode always uses `DATABASE_URL` and the facts registry stored in it. `provider: "local"` is refused because there is no model on Vercel's machines. Redeploy after changing variables.
+
+### 4. Load your data from your own machine
+
+The workbook, `facts.json` and the do-not-contact list never go through git or the Vercel build. Push them from your laptop into the shared database:
+
+```powershell
+.\.venv-substack\Scripts\python.exe -m pip install -r requirements.txt
+$dbUrl = Read-Host 'DATABASE_URL from Vercel > Storage > Neon (.env tab)' -AsSecureString
+$dbPtr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($dbUrl)
+try { $env:DATABASE_URL = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($dbPtr) }
+finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($dbPtr) }
+```
+
+Make a second local config, e.g. `.\.local\hosted.config.json`, that copies your `substack.config.json` but sets `"database": "env:DATABASE_URL"` and `"registry_path": "database"`, then:
+
+```powershell
+.\.venv-substack\Scripts\python.exe -m substack_outreach --config .\.local\hosted.config.json facts-push .\substack_outreach\facts.json
+.\.venv-substack\Scripts\python.exe -m substack_outreach --config .\.local\hosted.config.json pilot --input .\substack-technology.xlsx
+Remove-Item Env:\DATABASE_URL
+```
+
+`facts-push` validates the registry exactly as the local worker does and uploads it unchanged; approval stays a human edit to `facts.json` followed by another `facts-push`, and a changed registry invalidates earlier approvals as before. The DNC list is applied during `pilot`/`import`. `contacts-import`, `collect-contacts` and `export --format sendsheet` also work against the shared database with the same config. Importing over the network is slower than local SQLite (a few minutes for 525 rows).
+
+### 5. Use it
+
+Open `https://YOUR-APP.vercel.app/` and press **Sign in with Google**. The header shows who is signed in; reviewer fields are pre-filled with your email but still need the review checkbox. **Propose contacts from about pages** runs inside the 300-second limit, so keep its batch at 20 or below.
+
+Limits: request and response bodies are capped at 4.5 MB by Vercel; the send sheet is built with the CLI, not served by the API; runs are not scheduled. To check hosted storage before a deploy, run the test suite against a disposable Neon branch: set `TEST_DATABASE_URL` to that branch's URL (it drops and recreates the tables) and run the usual unittest command with `pg8000` installed.
 
 ## Validation and limits
 
