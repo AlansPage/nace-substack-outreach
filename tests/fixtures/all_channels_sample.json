@@ -1,0 +1,30 @@
+{
+  "source": "All channels .xlsx",
+  "note": "Synthetic sample with the same shape as the all-channels JSON export: four sheets, _row numbers, string cells, null for empty.",
+  "sheets": {
+    "Discord": {
+      "headers": ["rank", "name", "description", "invite_url", "member_count", "presence_count", "presence_ratio", "category", "company", "Who", "top_source_stars"],
+      "row_count": 1,
+      "rows": [{"_row": 2, "rank": "1", "name": "Example Server", "description": "A community", "invite_url": "https://discord.gg/example", "member_count": "1000", "presence_count": "100", "presence_ratio": "0.1", "category": "AI", "company": "Example", "Who": null, "top_source_stars": null}]
+    },
+    "mediun": {
+      "headers": ["name", "medium_url", "followers", "email", "other_emails", "twitter"],
+      "row_count": 1,
+      "rows": [{"_row": 2, "name": "Medium Writer", "medium_url": "https://medium.com/@writer", "followers": "500", "email": "writer@medium-example.test", "other_emails": null, "twitter": null}]
+    },
+    "substack": {
+      "headers": ["name", "author_name", "author_handle", "url", "substack_profile", "categories", "best_rank", "free_subscribers", "free_subscribers_label", "subscribers_range", "paid_tier_label", "bestseller_tier", "language", "has_podcast", "payments_state", "created_at", "first_post_date", "hero_text", "author_bio", "pub_id", "author_id"],
+      "row_count": 3,
+      "rows": [
+        {"_row": 2, "name": "Agent Notes", "author_name": "Sam Example", "author_handle": "sam", "url": "https://agentnotes.substack.com/", "substack_profile": "https://substack.com/@sam", "categories": "Technology", "best_rank": "4", "free_subscribers": "12000", "free_subscribers_label": "12K", "subscribers_range": "10K-50K", "paid_tier_label": null, "bestseller_tier": null, "language": "en", "has_podcast": "False", "payments_state": "disabled", "created_at": "2023-01-01", "first_post_date": "2023-01-02", "hero_text": "AI agents, LLM inference and model evaluation", "author_bio": "Engineer", "pub_id": "1001", "author_id": "501"},
+        {"_row": 3, "name": "Agent Notes Weekly", "author_name": "Sam Example", "author_handle": "sam", "url": "https://agentnotesweekly.substack.com/", "substack_profile": "https://substack.com/@sam", "categories": "Technology", "best_rank": null, "free_subscribers": "800", "free_subscribers_label": null, "subscribers_range": null, "paid_tier_label": null, "bestseller_tier": null, "language": "en", "has_podcast": "False", "payments_state": null, "created_at": null, "first_post_date": null, "hero_text": "Weekly notes on AI automation", "author_bio": null, "pub_id": "1002", "author_id": "501"},
+        {"_row": 4, "name": "Garden Diary", "author_name": "Pat Gardener", "author_handle": "pat", "url": "https://gardendiary.substack.com/", "substack_profile": null, "categories": "Home & Garden", "best_rank": null, "free_subscribers": "300", "free_subscribers_label": null, "subscribers_range": null, "paid_tier_label": null, "bestseller_tier": null, "language": "en", "has_podcast": "False", "payments_state": null, "created_at": null, "first_post_date": null, "hero_text": "Seasonal notes from a small vegetable garden and the compost heap", "author_bio": null, "pub_id": "1003", "author_id": "502"}
+      ]
+    },
+    "Copy of hackernoon": {
+      "headers": ["rank", "name", "handle", "hackernoon_url", "reader_hours_lifetime", "reader_time", "total_stories", "stories_in_tags_2y", "email", "other_emails", "email_source", "websites", "twitter", "linkedin", "location", "is_brand", "tags", "top_article", "top_article_url", "bio"],
+      "row_count": 1,
+      "rows": [{"_row": 2, "rank": "1", "name": "HN Writer", "handle": "hnwriter", "hackernoon_url": "https://hackernoon.com/u/hnwriter", "reader_hours_lifetime": "10", "reader_time": "1h", "total_stories": "3", "stories_in_tags_2y": "2", "email": null, "other_emails": null, "email_source": null, "websites": null, "twitter": null, "linkedin": null, "location": null, "is_brand": "False", "tags": "ai", "top_article": "A story", "top_article_url": "https://hackernoon.com/a-story", "bio": null}]
+    }
+  }
+}

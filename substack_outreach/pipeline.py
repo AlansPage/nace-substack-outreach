@@ -17,6 +17,7 @@ from .workbook import find_workbook
 
 
 CONTACT_CHANNELS = ["Email", "X", "LinkedIn", "Substack DM", "Other"]
+UPLOAD_MAX_ROWS = 5000
 
 
 class Pipeline:
@@ -73,6 +74,27 @@ class Pipeline:
 
     def import_workbook(self, input_path=None, batch=None, shortlist=None):
         result = self.store.import_workbook(find_workbook(input_path or self.config.get("input_path")))
+        return self.after_import(result, batch, shortlist)
+
+    def upload_rows(self, data):
+        """One batch of an uploaded table (the browser splits big files). The last batch applies DNC and the shortlist."""
+        sheet, headers, rows = data.get("sheet"), data.get("headers"), data.get("rows")
+        if not isinstance(sheet, str) or not isinstance(headers, list) or not all(isinstance(h, str) and h for h in headers):
+            raise ValueError("Upload needs a sheet name and a list of column headers")
+        if len(set(headers)) != len(headers) or not {"url", "pub_id"} & set(headers):
+            raise ValueError(f"Sheet {sheet!r} is not a Substack publication table (needs url or pub_id columns)")
+        if not isinstance(rows, list) or len(rows) > UPLOAD_MAX_ROWS or not all(isinstance(r, dict) for r in rows):
+            raise ValueError(f"Upload rows as a list of objects, at most {UPLOAD_MAX_ROWS} per request")
+        offset = int(data.get("offset") or 0)
+        cell = lambda v: None if v is None or v == "" else (v if isinstance(v, str) else str(v))
+        table = [(int(r["_row"]) if str(r.get("_row", "")).isdigit() else offset + n + 2, {h: cell(r.get(h)) for h in headers})
+                 for n, r in enumerate(rows)]
+        label = f"upload:{sheet} by {self.store.actor or 'local operator'}"
+        result = self.store.import_rows(headers, table, digest(["upload", sheet, headers, table]), label)
+        result["sheet"] = sheet
+        return self.after_import(result) if data.get("last") is True else result
+
+    def after_import(self, result, batch=None, shortlist=None):
         entries, name = self.dnc_list()
         result["dnc_list"] = name
         result["dnc_suppressed"] = self.store.apply_dnc(entries, name)

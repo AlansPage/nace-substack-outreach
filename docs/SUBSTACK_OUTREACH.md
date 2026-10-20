@@ -45,6 +45,12 @@ Local triage matches terms in the name, description, categories and author bio. 
 
 `import` and `pilot` apply the list on every run, including a resumed workbook, through the same suppression as **Do not contact author**: the author and every linked publication become `Do not contact` and leave the shortlist. A personal newsletter written by a vendor employee is not vendor-owned; do not list it unless the team decides so.
 
+### Upload JSON from the workspace
+
+**Upload JSON** in the toolbar loads a Substack table without the command line, locally or on the hosted workspace. It accepts the Substack-only export (`{"sheets": {"substack": {"headers": [...], "rows": [...]}}}`, each row with its Excel `_row`), a `{headers, rows}` object, or a plain array of row objects with the workbook's column names. Only tables with a `url` or `pub_id` column are treated as Substack publications; any other table in the file is skipped and named in the result. The browser sends the rows in parts of about 1 MB (Vercel caps a request at 4.5 MB); 15,617 rows take about 15 requests.
+
+Uploads never replace what the team has done. Rows already known (same `pub_id` or publication URL) keep their status, research, drafts, owner and every **✓ Contacted** mark; uploading an identical part again is recognised and skipped; a newer file only adds new publications. Contacted marks belong to the writer, so a new publication by someone already contacted shows the mark too. The do-not-contact list and the shortlist run after the last part. Updated subscriber counts in a newer file are kept in the import history but do not overwrite the stored publication.
+
 ## Review workflow
 
 1. Open a pilot publication. Verify its actual publication URL, public first name and explicit published business/contact/submission route. Store source URLs, or label directly user-supplied provenance. Do not derive a person's identity from a handle. Unknown names use a neutral mock/manual greeting and a review flag; live writing requires a confirmed name.

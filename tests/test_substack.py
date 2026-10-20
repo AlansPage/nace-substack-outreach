@@ -305,6 +305,39 @@ class PipelineTests(unittest.TestCase):
         bob.action(third, 'contacted', {'confirmed': True, 'channel': 'Email'})
         self.assertEqual(bob.store.get(third)['previous_contact'][0]['source'], 'Marked contacted in the workspace by bob@example.com')
 
+    def upload_sheet(self, sheet, last=True, extra_rows=()):
+        table = json.loads((FIXTURES / 'all_channels_sample.json').read_text(encoding='utf-8'))['sheets'][sheet]
+        return self.p.upload_rows({'sheet': sheet, 'headers': table['headers'], 'rows': table['rows'] + list(extra_rows), 'offset': 0, 'last': last})
+
+    def test_json_upload_imports_substack_sheet_and_rejects_other_channels(self):
+        result = self.upload_sheet('substack')
+        self.assertEqual((result['inserted'], result['duplicates'], result['sheet']), (3, 0, 'substack'))
+        self.assertEqual(result['shortlisted'], 2)  # the garden diary has no topical signal
+        pub = self.p.store.get(1)
+        self.assertEqual((pub['publication'], pub['source']['free_subscribers'], pub['author_publications']), ('Agent Notes', '12000', 2))
+        self.assertTrue(self.p.store.db.execute("SELECT path FROM imports").fetchone()[0].startswith('upload:substack by '))
+        for other in ('Discord', 'mediun', 'Copy of hackernoon'):
+            with self.assertRaisesRegex(ValueError, 'not a Substack publication table'):
+                self.upload_sheet(other)
+        with self.assertRaisesRegex(ValueError, 'at most 5000'):
+            self.p.upload_rows({'sheet': 'substack', 'headers': ['url'], 'rows': [{}] * 5001})
+
+    def test_reupload_keeps_who_was_contacted(self):
+        self.upload_sheet('substack')
+        self.p.action(1, 'contacted', {'confirmed': True, 'channel': 'X', 'link': 'https://x.com/sam'})
+        self.p.action(3, 'skip', {'reason': 'Off topic'})
+        again = self.upload_sheet('substack')
+        self.assertTrue(again['resumed'])
+        newer = {'_row': 5, 'name': 'Agent Notes Podcast', 'author_name': 'Sam Example', 'url': 'https://agentnotespod.substack.com/',
+                 'categories': 'Technology', 'hero_text': 'Interviews about AI agents and LLM evaluation', 'pub_id': '1004', 'author_id': '501'}
+        result = self.upload_sheet('substack', extra_rows=[newer])
+        self.assertEqual((result['inserted'], result['duplicates']), (1, 3))
+        listed = {i['publication']: i for i in self.p.queue(scope='all')['items']}
+        for name in ('Agent Notes', 'Agent Notes Weekly', 'Agent Notes Podcast'):
+            self.assertEqual(listed[name]['contacted']['channel'], 'X', name)  # same author, including the new publication
+        self.assertEqual(listed['Garden Diary']['status'], 'Skipped')
+        self.assertEqual(self.p.store.db.execute('SELECT count(*) FROM contacts').fetchone()[0], 1)
+
     def test_pending_claims_and_mock_cannot_approve(self):
         pid = self.pub(); self.research(pid)
         p = self.p.generate(pid)

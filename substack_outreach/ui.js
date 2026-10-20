@@ -28,7 +28,29 @@
   // Shared "already contacted" marker: shown in the list and on the writer's panel for every teammate.
   const contactedHTML = c => c ? `<span class="ss-contacted">✓ ${esc(c.event || 'Contacted')} · ${esc(c.channel)} · ${esc(c.actor || 'not recorded who')} · ${esc(String(c.at || '').slice(0, 10))}</span>` : '';
   const signInHTML = () => 'Sign in to open the shared workspace. <a href="/api/auth/login">Sign in with Google</a>';
-  globalThis.SubstackUIHelpers = { esc, safeURL, link, wordCount, lengthLabel, previewHTML, proposalHTML, userHTML, signInHTML, contactedHTML };
+  // Upload: accept the all-sheets JSON export, {headers, rows}, or a plain array of rows. Only tables with
+  // url/pub_id columns are Substack publications; the rest are reported as skipped. Batches stay well under
+  // the 4.5 MB request cap.
+  const uploadPlan = (data, maxChars = 1000000, maxRows = 5000) => {
+    const tables = Array.isArray(data) ? { upload: { rows: data } } : data && data.sheets ? data.sheets : { upload: data || {} };
+    const plan = { tables: [], skipped: [] };
+    for (const [sheet, table] of Object.entries(tables)) {
+      const rows = Array.isArray(table && table.rows) ? table.rows : [];
+      const headers = Array.isArray(table.headers) ? table.headers : [...new Set(rows.flatMap(r => Object.keys(r || {})).filter(k => k !== '_row'))];
+      if (!rows.length || !(headers.includes('url') || headers.includes('pub_id'))) { plan.skipped.push(sheet); continue; }
+      const batches = [];
+      let batch = [], size = 0;
+      for (const row of rows) {
+        const length = JSON.stringify(row).length;
+        if (batch.length && (size + length > maxChars || batch.length >= maxRows)) { batches.push(batch); batch = []; size = 0; }
+        batch.push(row); size += length;
+      }
+      if (batch.length) batches.push(batch);
+      plan.tables.push({ sheet, headers, rows: rows.length, batches });
+    }
+    return plan;
+  };
+  globalThis.SubstackUIHelpers = { esc, safeURL, link, wordCount, lengthLabel, previewHTML, proposalHTML, userHTML, signInHTML, contactedHTML, uploadPlan };
   if (typeof document === 'undefined') return;
   const root = document.getElementById('tab-substack');
   if (!root) return;
@@ -50,7 +72,7 @@
     root.innerHTML = `<header class="ss-hero"><div><p class="ss-eyebrow">NACE AI · LOCAL RESEARCH WORKSPACE</p><h1>Substack outreach</h1><p>Evidence first. A short, personal invitation. A human decision.</p></div><span class="ss-chip">Manual sending only</span></header>
       <div id="ss-message" class="ss-message" role="status" aria-live="polite">Connecting to local worker…</div>
       <div id="ss-stats" class="ss-stats"></div>
-      <div class="ss-toolbar"><label>Queue <select id="ss-scope"><option value="pilot">20-publication pilot</option><option value="shortlisted">Shortlist</option><option value="all">All imported + fixture</option></select></label><label>Status <select id="ss-status"><option value="">All statuses</option></select></label><label class="ss-search">Search <input id="ss-search" type="search" placeholder="Publication, author, topic"></label><button id="ss-refresh">Refresh</button><button data-export="csv">Export CSV</button><button data-export="json">Export JSON</button><button id="ss-contacts">Propose contacts from about pages</button></div>
+      <div class="ss-toolbar"><label>Queue <select id="ss-scope"><option value="pilot">20-publication pilot</option><option value="shortlisted">Shortlist</option><option value="all">All imported + fixture</option></select></label><label>Status <select id="ss-status"><option value="">All statuses</option></select></label><label class="ss-search">Search <input id="ss-search" type="search" placeholder="Publication, author, topic"></label><button id="ss-refresh">Refresh</button><button data-export="csv">Export CSV</button><button data-export="json">Export JSON</button><button id="ss-contacts">Propose contacts from about pages</button><button id="ss-upload">Upload JSON</button><input id="ss-upload-file" type="file" accept=".json,application/json" hidden></div>
       <div class="ss-layout"><aside class="ss-queue" aria-label="Publication queue"><div id="ss-list"></div><div class="ss-pagination"><button id="ss-prev">Previous</button><span id="ss-count"></span><button id="ss-next">Next</button></div></aside><section id="ss-detail" aria-label="Publication review"><div class="ss-empty"><h2>Choose a publication</h2><p>Review its sources, verify the name and contact route, then draft.</p><p>Subscriber counts are imported estimates. Metadata matches are only triage signals.</p></div></section></div>`;
   }
   async function start() {
@@ -66,6 +88,7 @@
       root.addEventListener('click', handleClick);
       root.addEventListener('change', e => { if (['ss-scope', 'ss-status'].includes(e.target.id)) { scope = val('scope'); offset = 0; refresh().catch(report); } });
       root.addEventListener('input', e => { if (['ss-subject', 'ss-body'].includes(e.target.id)) { dirty = true; $('#ss-length').textContent = lengthLabel(val('body')); $('#ss-rendered').innerHTML = previewHTML(val('body')); } });
+      $('#ss-upload-file').addEventListener('change', e => { const file = e.target.files[0]; e.target.value = ''; if (file) upload(file).catch(report); });
       $('#ss-search').addEventListener('keydown', e => { if (e.key === 'Enter') { offset = 0; refresh().catch(report); } });
       await refresh();
       notice(`${boot.hosted ? 'Shared workspace connected' : 'Local worker connected'} · ${boot.provider === 'mock' ? 'MOCK mode: previews cannot be approved' : 'Writing provider: ' + boot.provider} · Sender: ${boot.sender.name}, ${boot.sender.email} · Network ${boot.network_enabled ? 'permission-gated' : 'disabled'}`);
@@ -84,6 +107,27 @@
     $('#ss-count').textContent = `${queue.total ? offset + 1 : 0}–${Math.min(offset + queue.items.length, queue.total)} / ${queue.total}`;
     $('#ss-prev').disabled = offset === 0;
     $('#ss-next').disabled = offset + 100 >= queue.total;
+  }
+  async function upload(file) {
+    if (busy) return;
+    busy = true;
+    try {
+      notice(`Reading ${file.name}…`);
+      const plan = uploadPlan(JSON.parse(await file.text()));
+      if (!plan.tables.length) throw new Error(`No Substack table found in ${file.name} (needs url or pub_id columns). Skipped: ${plan.skipped.join(', ') || 'none'}`);
+      let inserted = 0, duplicates = 0, suppressed = 0;
+      for (const table of plan.tables) {
+        let offset = 0;
+        for (const [i, rows] of table.batches.entries()) {
+          notice(`Uploading ${table.sheet}: part ${i + 1} of ${table.batches.length} (${table.rows} rows). Keep this tab open.`);
+          const result = await api('upload', { sheet: table.sheet, headers: table.headers, rows, offset, last: i === table.batches.length - 1 });
+          inserted += result.inserted || 0; duplicates += result.duplicates || 0; suppressed += (result.dnc_suppressed || []).length;
+          offset += rows.length;
+        }
+      }
+      await refresh();
+      notice(`Upload done: ${inserted} new publications, ${duplicates} already known (their contacted marks, drafts and status are kept), ${suppressed} on the do-not-contact list.${plan.skipped.length ? ' Skipped (not Substack tables): ' + plan.skipped.join(', ') + '.' : ''}`);
+    } finally { busy = false; }
   }
   async function open(id) {
     if (dirty) throw new Error('Save the edited draft before switching publications.');
@@ -117,6 +161,7 @@
       busy = true;
       if (button.dataset.pub) return await open(Number(button.dataset.pub));
       if (button.id === 'ss-refresh') return await refresh();
+      if (button.id === 'ss-upload') { $('#ss-upload-file').click(); return; }
       if (button.id === 'ss-contacts') {
         notice('Reading about pages through the permission-gated collector…');
         const { results } = await api('collect-contacts', { batch: boot.batch_size });

@@ -18,6 +18,12 @@ JSON = "application/json; charset=utf-8"
 SECURITY_HEADERS = {"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
                     "X-Frame-Options": "DENY", "Referrer-Policy": "no-referrer"}
 MAX_BODY = 250_000
+# Uploaded tables arrive in batches; Vercel caps a request at 4.5 MB.
+UPLOAD_MAX_BODY = 4_000_000
+
+
+def body_limit(path):
+    return UPLOAD_MAX_BODY if path.rstrip("/").endswith("/api/substack/upload") else MAX_BODY
 
 
 def api_get(pipeline, config, path, query):
@@ -50,10 +56,12 @@ def api_get(pipeline, config, path, query):
 
 def api_post(pipeline, path, raw, content_type):
     try:
-        if not 0 < len(raw) <= MAX_BODY or content_type != "application/json":
-            raise ValueError("Expected JSON body, maximum 250 KB")
+        if not 0 < len(raw) <= body_limit(path) or content_type != "application/json":
+            raise ValueError(f"Expected JSON body, maximum {body_limit(path) // 1000} KB")
         data = json.loads(raw)
         parts = path.strip("/").split("/")
+        if parts == ["api", "substack", "upload"]:
+            return 200, pipeline.upload_rows(data), JSON
         if parts == ["api", "substack", "collect-contacts"]:
             return 200, {"results": pipeline.collect_contacts(max(0, int(data.get("batch") or 0)) or None, bool(data.get("retry_failed")))}, JSON
         if len(parts) != 5 or parts[:3] != ["api", "substack", "publication"]:
@@ -120,8 +128,9 @@ def serve(config, port=8765):
                 size = int(self.headers.get("Content-Length", "0"))
             except ValueError:
                 size = 0
-            raw = self.rfile.read(size) if 0 < size <= MAX_BODY else b""
-            status, body, content_type = api_post(pipeline, urlsplit(self.path).path, raw, self.headers.get_content_type())
+            path = urlsplit(self.path).path
+            raw = self.rfile.read(size) if 0 < size <= body_limit(path) else b""
+            status, body, content_type = api_post(pipeline, path, raw, self.headers.get_content_type())
             return self.send(body, status, content_type)
 
     print(f"Local review: http://127.0.0.1:{port}/", flush=True)

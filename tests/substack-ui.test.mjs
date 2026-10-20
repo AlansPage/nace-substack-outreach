@@ -63,3 +63,17 @@ test('contacted marker shows channel, who and the date, escaped', () => {
   assert.ok(html.includes('LinkedIn') && html.includes('2026-10-20') && !html.includes('09:00'));
   assert.ok(html.includes('&lt;i&gt;alice@example.com'));
 });
+
+test('upload plan takes the substack sheet of the all-channels export and batches it', () => {
+  const sample = JSON.parse(fs.readFileSync('tests/fixtures/all_channels_sample.json', 'utf8'));
+  const plan = C.uploadPlan(sample);
+  assert.deepEqual([...plan.skipped], ['Discord', 'mediun', 'Copy of hackernoon']);
+  assert.equal(plan.tables.length, 1);
+  assert.equal(plan.tables[0].sheet, 'substack');
+  assert.equal(plan.tables[0].rows, 3);
+  assert.deepEqual([...plan.tables[0].headers], sample.sheets.substack.headers);
+  const small = C.uploadPlan(sample, 1500);
+  assert.ok(small.tables[0].batches.length > 1);
+  assert.equal(small.tables[0].batches.flat().length, 3);
+  assert.equal(C.uploadPlan([{ url: 'https://a.substack.com', name: 'A' }]).tables[0].sheet, 'upload');
+});

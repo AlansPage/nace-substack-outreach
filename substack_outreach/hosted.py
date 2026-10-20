@@ -12,7 +12,7 @@ from urllib.parse import parse_qs, urlsplit
 from . import auth
 from .config import load_hosted_config
 from .pipeline import Pipeline
-from .server import JSON, MAX_BODY, SECURITY_HEADERS, api_get, api_post, encode
+from .server import JSON, SECURITY_HEADERS, api_get, api_post, body_limit, encode
 
 
 def request_path(raw_path):
@@ -103,8 +103,8 @@ class handler(BaseHTTPRequestHandler):
             size = int(self.headers.get("Content-Length", "0"))
         except ValueError:
             size = 0
-        raw = self.rfile.read(size) if 0 < size <= MAX_BODY else b""
         path, _ = request_path(self.path)
+        raw = self.rfile.read(size) if 0 < size <= body_limit(path) else b""
         return self.with_pipeline(user, lambda pipeline, config: self.post_route(pipeline, path, raw))
 
     def post_route(self, pipeline, path, raw):

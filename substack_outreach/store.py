@@ -126,6 +126,13 @@ class Store:
         if previous:
             return {"resumed": True, "inserted": 0, "headers": json.loads(previous["headers"])}
         headers, rows = read_workbook(path)
+        return self.import_rows(headers, rows, fingerprint, str(path))
+
+    def import_rows(self, headers, rows, fingerprint, label):
+        """Workbook or uploaded rows -> publications. Existing records, history and marks are never replaced."""
+        previous = self.db.execute("SELECT * FROM imports WHERE fingerprint=?", (fingerprint,)).fetchone()
+        if previous:
+            return {"resumed": True, "inserted": 0, "duplicates": 0, "rows": len(rows), "headers": json.loads(previous["headers"])}
         inserted, duplicates = 0, 0
         with self.db:
             for rowno, src in rows:
@@ -162,7 +169,7 @@ class Store:
                 for key in keys:
                     self.db.execute("INSERT OR IGNORE INTO aliases VALUES(?,?)", (key, pid))
                 self.db.execute("INSERT INTO source_rows VALUES(?,?,?,?)", (fingerprint, rowno, pid, dumps(src)))
-            self.db.execute("INSERT INTO imports VALUES(?,?,?,?)", (fingerprint, str(path), dumps(headers), now()))
+            self.db.execute("INSERT INTO imports VALUES(?,?,?,?)", (fingerprint, label, dumps(headers), now()))
         return {"rows": len(rows), "inserted": inserted, "duplicates": duplicates, "headers": headers,
                 "missing_headers": sorted(EXPECTED - set(headers))}
 
