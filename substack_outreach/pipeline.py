@@ -487,9 +487,9 @@ class Pipeline:
             draft, e = p.get("draft") or {}, p.get("evidence") or {}
             rows.append({"publication": p["publication"], "author": p["author_name"], "publication_url": p["publication_url"],
                          "article_url": e.get("article_url", ""), "supporting_excerpt": e.get("supporting_excerpt", ""),
-                         "angle": e.get("drex_connection", ""), "contact": p["contact_route"], "contact_source": p["contact_source_url"],
+                         "angle": e.get("drex_connection", ""), "contact": p.get("contact_route", ""), "contact_source": p.get("contact_source_url", ""),
                          "subject": draft.get("subject", ""), "email_body": draft.get("plain_text_body", ""),
-                         "owner": p["owner"], "status": p["status"], "review_flags": draft.get("review_flags", e.get("review_flags", ["NEEDS_RESEARCH"])),
+                         "owner": p.get("owner", ""), "status": p["status"], "review_flags": draft.get("review_flags", e.get("review_flags", ["NEEDS_RESEARCH"])),
                          "contacted": contacted_label(p["previous_contact"])})
         return rows
 

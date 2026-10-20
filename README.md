@@ -82,10 +82,10 @@ Setup steps are in [`docs/SUBSTACK_OUTREACH.md`](docs/SUBSTACK_OUTREACH.md#hoste
 
 | Hosted piece | Location |
 |---|---|
-| Vercel function | `api/index.py` → `substack_outreach/hosted.py` |
+| Vercel entry point (WSGI `app`) | `app.py` → `substack_outreach/hosted.py` |
 | Google sign-in and sessions | `substack_outreach/auth.py` |
 | SQLite / Postgres storage | `substack_outreach/db.py` |
-| Build and routing | `vercel.json`, `requirements.txt`, `.python-version`, `.vercelignore` |
+| Entry point, dependency and upload filter | `pyproject.toml` (`[tool.vercel] entrypoint`), `.python-version`, `.vercelignore` |
 
 ## The facts registry
 

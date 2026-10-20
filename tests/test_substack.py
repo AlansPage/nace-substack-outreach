@@ -1269,13 +1269,52 @@ class HostedTests(unittest.TestCase):
         self.assertEqual(status, 500)
         self.assertIn('GOOGLE_CLIENT_SECRET', json.loads(body)['error'])
 
-    def test_vercel_files_keep_private_inputs_out(self):
+    def test_vercel_entry_point_and_private_inputs(self):
         ignore = (ROOT / '.vercelignore').read_text(encoding='utf-8')
         for private in ('.local/', '*.xlsx', 'substack.config.json', 'substack_outreach/facts.json', 'substack_outreach/dnc.json', '*.sqlite3'):
             self.assertIn(private, ignore.splitlines())
-        vercel = json.loads((ROOT / 'vercel.json').read_text(encoding='utf-8'))
-        self.assertEqual(vercel['rewrites'], [{'source': '/api/(.*)', 'destination': '/api/index?path=$1'}])
-        self.assertEqual((ROOT / 'requirements.txt').read_text(encoding='utf-8').split('\n')[-2], 'pg8000==1.31.2')
+        import tomllib
+        project = tomllib.loads((ROOT / 'pyproject.toml').read_text(encoding='utf-8'))
+        self.assertEqual(project['tool']['vercel']['entrypoint'], 'app:app')
+        self.assertEqual(project['project']['dependencies'], ['pg8000==1.31.2'])
+        # New Vercel projects ignore api/*.py functions; a stale vercel.json "functions" entry fails the build.
+        self.assertFalse((ROOT / 'api').exists())
+        self.assertFalse((ROOT / 'vercel.json').exists())
+        import app
+        self.assertIs(app.app, __import__('substack_outreach.hosted', fromlist=['app']).app)
+
+    def wsgi(self, method, path, headers=None, body=b''):
+        from substack_outreach.hosted import app
+        query = path.split('?', 1)[1] if '?' in path else ''
+        environ = {'REQUEST_METHOD': method, 'PATH_INFO': path.split('?')[0], 'QUERY_STRING': query, 'wsgi.input': io.BytesIO(body)}
+        for name, value in (headers or {}).items():
+            key = name.upper().replace('-', '_')
+            environ[key if key in ('CONTENT_TYPE', 'CONTENT_LENGTH') else 'HTTP_' + key] = value
+        if body:
+            environ['CONTENT_LENGTH'] = str(len(body))
+        seen = {}
+        with patch.dict('os.environ', self.env):
+            payload = b''.join(app(environ, lambda status, pairs: seen.update(status=status, headers=pairs)))
+        return int(seen['status'].split()[0]), seen['headers'], payload
+
+    def test_wsgi_app_serves_page_signin_and_mutations_like_vercel(self):
+        status, headers, body = self.wsgi('GET', '/')
+        self.assertEqual((status, dict(headers)['Content-Type']), (200, 'text/html; charset=utf-8'))
+        self.assertIn(b'id="tab-substack"', body)
+        self.assertEqual(self.wsgi('GET', '/api/substack/bootstrap')[0], 401)
+        self.assertEqual(self.wsgi('GET', '/nothing-here')[0], 404)
+        cookie = self.signed_in()
+        status, _, body = self.wsgi('GET', '/api/substack/bootstrap', {'Cookie': cookie})
+        self.assertEqual((status, json.loads(body)['user']['email']), (200, 'reviewer@example.com'))
+        status, headers, _ = self.wsgi('GET', '/api/substack/export?format=csv&scope=pilot', {'Cookie': cookie})
+        self.assertTrue(dict(headers)['Content-Disposition'].startswith('attachment; filename="substack-pilot-'))
+        payload = dumps({'reason': 'Not a fit'}).encode()
+        base = {'Cookie': cookie, 'Content-Type': 'application/json; charset=utf-8', 'Origin': 'https://outreach.example.test',
+                'X-Local-Token': self.auth.csrf_token(self.settings, cookie)}
+        status, _, body = self.wsgi('POST', f'/api/substack/publication/{self.pid}/skip', base, payload)
+        self.assertEqual((status, json.loads(body)['status']), (200, 'Skipped'))
+        self.assertEqual(self.wsgi('POST', f'/api/substack/publication/{self.pid}/skip', base | {'Origin': 'https://evil.example'}, payload)[0], 403)
+
 
 
 if __name__ == '__main__':

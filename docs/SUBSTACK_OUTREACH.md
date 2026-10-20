@@ -260,13 +260,13 @@ Metrics report imported/shortlisted publications, research completion and failed
 
 ## Hosted team workspace (Vercel)
 
-The same workspace can run on Vercel so teammates share one database. Hosted mode uses Postgres (Neon from the Vercel Marketplace) through the pure-Python `pg8000` driver, the only package in `requirements.txt`; the local worker still needs no packages. Nothing sends email in either mode.
+The same workspace can run on Vercel so teammates share one database. Hosted mode uses Postgres (Neon from the Vercel Marketplace) through the pure-Python `pg8000` driver, the only dependency in `pyproject.toml` (and `requirements.txt`); the local worker still needs no packages. Nothing sends email in either mode.
 
 **Who can see what.** Sign-in is open to any Google account unless you restrict it. Everyone who signs in can read the facts registry (including unreleased numbers and launch timing), every contact route and draft, and can approve drafts and record sends. Every action is recorded with the signed-in email in `events.actor`. Set `ALLOWED_EMAIL_DOMAIN=nace.ai` (checked against Google's `hd` claim) or `ALLOWED_EMAILS=a@nace.ai,b@nace.ai` to restrict sign-in; no code change is needed.
 
 ### 1. Create the project and database
 
-1. On vercel.com: **Add New → Project**, import `AlansPage/nace-substack-outreach`. `vercel.json` sets the build (`python3 build.py`, output `public/`) and sends every `/api/*` request to `api/index.py` with a 300-second limit.
+1. On vercel.com: **Add New → Project**, import `AlansPage/nace-substack-outreach`, Framework Preset **Other**, no build command. `pyproject.toml` names the entry point (`[tool.vercel] entrypoint = "app:app"`): every request, including the page at `/`, goes to the WSGI `app` in `app.py`, which renders the page itself. There is no `api/` folder and no `vercel.json`: new Vercel projects no longer turn `api/*.py` files into functions, and a leftover `functions` entry fails the build with `unused_function`.
 2. In the project: **Storage → Marketplace → Neon → Connect**. Vercel adds `DATABASE_URL` to the project's environment variables. The tables are created on first use.
 
 ### 2. Create the Google sign-in client
