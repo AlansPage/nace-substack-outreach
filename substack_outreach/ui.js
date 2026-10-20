@@ -50,7 +50,10 @@
     }
     return plan;
   };
-  globalThis.SubstackUIHelpers = { esc, safeURL, link, wordCount, lengthLabel, previewHTML, proposalHTML, userHTML, signInHTML, contactedHTML, uploadPlan };
+  const exportName = (disposition, fallback) => (String(disposition || '').match(/filename="([^"\/]+)"/) || [])[1] || fallback;
+  const exportMessage = (name, rows, drafts) => `Exported ${name}: ${rows ?? '?'} rows, ${drafts ?? '?'} with an email draft. Check your Downloads folder.`
+    + (Number(drafts) === 0 ? ' No drafts yet: rows still need research or a generated draft, so subject and body columns are empty.' : '');
+  globalThis.SubstackUIHelpers = { esc, safeURL, link, wordCount, lengthLabel, previewHTML, proposalHTML, userHTML, signInHTML, contactedHTML, uploadPlan, exportName, exportMessage };
   if (typeof document === 'undefined') return;
   const root = document.getElementById('tab-substack');
   if (!root) return;
@@ -107,6 +110,24 @@
     $('#ss-count').textContent = `${queue.total ? offset + 1 : 0}–${Math.min(offset + queue.items.length, queue.total)} / ${queue.total}`;
     $('#ss-prev').disabled = offset === 0;
     $('#ss-next').disabled = offset + 100 >= queue.total;
+  }
+  async function exportFile(format) {
+    notice(`Preparing the ${format.toUpperCase()} export…`);
+    const response = await fetch(`/api/substack/export?format=${format}&scope=${encodeURIComponent(scope)}`, { credentials: 'same-origin' });
+    if (!response.ok) {
+      const detail = await response.json().catch(() => ({}));
+      throw new Error(`Export failed: ${detail.error || 'worker returned ' + response.status}`);
+    }
+    const blob = await response.blob();
+    const name = exportName(response.headers.get('Content-Disposition'), `substack-${scope}.${format}`);
+    // The link must be in the page for Chrome, Edge and Firefox to start the download; keep the blob alive long enough.
+    const href = URL.createObjectURL(blob), anchor = Object.assign(document.createElement('a'), { href, download: name });
+    anchor.style.display = 'none';
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    setTimeout(() => URL.revokeObjectURL(href), 60000);
+    notice(exportMessage(name, response.headers.get('X-Export-Rows'), response.headers.get('X-Export-Drafts')));
   }
   async function upload(file) {
     if (busy) return;
@@ -171,12 +192,7 @@
         return await refresh();
       }
       if (button.id === 'ss-prev' || button.id === 'ss-next') { offset += button.id === 'ss-prev' ? -100 : 100; return await refresh(); }
-      if (button.dataset.export) {
-        const response = await fetch(`/api/substack/export?format=${button.dataset.export}&scope=${encodeURIComponent(scope)}`);
-        if (!response.ok) throw new Error('Export failed');
-        const blob = await response.blob(), url = URL.createObjectURL(blob), anchor = document.createElement('a');
-        anchor.href = url; anchor.download = `substack-${scope}.${button.dataset.export}`; anchor.click(); setTimeout(() => URL.revokeObjectURL(url), 1000); return;
-      }
+      if (button.dataset.export) return await exportFile(button.dataset.export);
       if (!button.dataset.action || !selected) return;
       let action = button.dataset.action, data = {};
       if (action === 'copy') {

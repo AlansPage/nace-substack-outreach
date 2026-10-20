@@ -77,3 +77,11 @@ test('upload plan takes the substack sheet of the all-channels export and batche
   assert.equal(small.tables[0].batches.flat().length, 3);
   assert.equal(C.uploadPlan([{ url: 'https://a.substack.com', name: 'A' }]).tables[0].sheet, 'upload');
 });
+
+test('export names the file from the server and says when there are no drafts yet', () => {
+  assert.equal(C.exportName('attachment; filename="substack-pilot-2026-10-20.csv"', 'x.csv'), 'substack-pilot-2026-10-20.csv');
+  assert.equal(C.exportName(null, 'substack-pilot.csv'), 'substack-pilot.csv');
+  assert.equal(C.exportName('attachment; filename="../../evil.csv"', 'safe.csv'), 'safe.csv');
+  assert.ok(C.exportMessage('a.csv', '20', '0').includes('No drafts yet'));
+  assert.ok(!C.exportMessage('a.csv', '20', '3').includes('No drafts yet'));
+});

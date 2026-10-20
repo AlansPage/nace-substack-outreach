@@ -12,7 +12,8 @@ from urllib.parse import parse_qs, urlsplit
 from .common import FITS, STATUSES
 from .config import ROOT
 from .evidence import ASKS, prepare_evidence
-from .pipeline import CONTACT_CHANNELS, Pipeline
+from .common import now
+from .pipeline import CONTACT_CHANNELS, Pipeline, render_export
 
 JSON = "application/json; charset=utf-8"
 SECURITY_HEADERS = {"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
@@ -27,7 +28,7 @@ def body_limit(path):
 
 
 def api_get(pipeline, config, path, query):
-    """(status, body, content type) for a read route. bootstrap callers add their own token and user."""
+    """(status, body, content type[, extra headers]) for a read route. bootstrap callers add their own token and user."""
     try:
         if path == "/api/substack/bootstrap":
             facts, _ = pipeline.facts()
@@ -41,10 +42,16 @@ def api_get(pipeline, config, path, query):
         if path == "/api/substack/metrics":
             return 200, pipeline.store.metrics(), JSON
         if path == "/api/substack/export":
-            fmt = query.get("format", "json")
+            fmt, scope = query.get("format", "json"), query.get("scope", "pilot")
             if fmt not in ("csv", "json"):
                 raise ValueError("The worker exports csv or json; build the send sheet with the CLI")
-            return 200, pipeline.export(fmt, query.get("scope", "pilot")), "text/csv; charset=utf-8" if fmt == "csv" else JSON
+            if scope not in ("pilot", "shortlisted", "all"):
+                raise ValueError("Export scope must be pilot, shortlisted or all")
+            rows = pipeline.export_rows(scope)
+            # A real file download: works as a plain link and tells the page what it contains.
+            headers = {"Content-Disposition": f'attachment; filename="substack-{scope}-{now()[:10]}.{fmt}"',
+                       "X-Export-Rows": str(len(rows)), "X-Export-Drafts": str(sum(1 for r in rows if r["email_body"]))}
+            return 200, render_export(rows, fmt), "text/csv; charset=utf-8" if fmt == "csv" else JSON, headers
         if path.startswith("/api/substack/publication/"):
             pub = pipeline.detail(int(path.rsplit("/", 1)[1]))
             pub["evidence_candidate"] = prepare_evidence(pub)
@@ -96,12 +103,12 @@ def serve(config, port=8765):
                 return False
             return not mutation or self.headers.get("X-Local-Token") == token
 
-        def send(self, value, status=200, content_type=JSON):
+        def send(self, value, status=200, content_type=JSON, headers=None):
             body = encode(value)
             self.send_response(status)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
-            for name, header in SECURITY_HEADERS.items():
+            for name, header in {**SECURITY_HEADERS, **(headers or {})}.items():
                 self.send_header(name, header)
             self.end_headers()
             self.wfile.write(body)
@@ -116,10 +123,10 @@ def serve(config, port=8765):
                 if static[u.path].is_file():
                     return self.send(static[u.path].read_bytes(), content_type="text/html; charset=utf-8")
                 return self.send({"error": "Not found. Run python build.py first."}, 404)
-            status, body, content_type = api_get(pipeline, config, u.path, {k: v[0] for k, v in parse_qs(u.query).items()})
+            status, body, content_type, *extra = api_get(pipeline, config, u.path, {k: v[0] for k, v in parse_qs(u.query).items()})
             if u.path == "/api/substack/bootstrap" and status == 200:
                 body["token"] = token
-            return self.send(body, status, content_type)
+            return self.send(body, status, content_type, extra[0] if extra else None)
 
         def do_POST(self):
             if not self.headers_ok(mutation=True):

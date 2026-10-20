@@ -32,12 +32,12 @@ class handler(BaseHTTPRequestHandler):
         # URLs and bodies can contain contact data. Avoid request logs.
         pass
 
-    def reply(self, value, status=200, content_type=JSON, cookies=(), location=None):
+    def reply(self, value, status=200, content_type=JSON, cookies=(), location=None, headers=None):
         body = encode(value)
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
-        for name, header in SECURITY_HEADERS.items():
+        for name, header in {**SECURITY_HEADERS, **(headers or {})}.items():
             self.send_header(name, header)
         for cookie in cookies:
             self.send_header("Set-Cookie", cookie)
@@ -68,10 +68,10 @@ class handler(BaseHTTPRequestHandler):
         return self.with_pipeline(user, lambda pipeline, config: self.get_route(settings, pipeline, config, path, query, user))
 
     def get_route(self, settings, pipeline, config, path, query, user):
-        status, body, content_type = api_get(pipeline, config, path, query)
+        status, body, content_type, *extra = api_get(pipeline, config, path, query)
         if path == "/api/substack/bootstrap" and status == 200:
             body.update(token=auth.csrf_token(settings, self.headers.get("Cookie")), user={"email": user["email"]}, hosted=True)
-        return self.reply(body, status, content_type)
+        return self.reply(body, status, content_type, headers=extra[0] if extra else None)
 
     def callback(self, settings, query):
         flow = auth.unsign(settings.session_secret, auth.cookies(self.headers.get("Cookie")).get(auth.FLOW_COOKIE))

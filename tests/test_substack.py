@@ -338,6 +338,22 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(listed['Garden Diary']['status'], 'Skipped')
         self.assertEqual(self.p.store.db.execute('SELECT count(*) FROM contacts').fetchone()[0], 1)
 
+    def test_export_is_a_named_download_with_counts_and_excel_friendly_csv(self):
+        from substack_outreach.server import api_get
+        pid, _ = self.ready()
+        self.p.action(pid, 'contacted', {'confirmed': True, 'channel': 'Email'})
+        other = self.pub('No draft yet', 'author:9')
+        pub = self.p.store.get(other); pub['contact_route'] = 'editor@nodraft.example'; self.p.store.save(pub); self.p.store.db.commit()
+        status, body, content_type, headers = api_get(self.p, self.config, '/api/substack/export', {'format': 'csv', 'scope': 'pilot'})
+        self.assertEqual((status, content_type), (200, 'text/csv; charset=utf-8'))
+        self.assertRegex(headers['Content-Disposition'], r'^attachment; filename="substack-pilot-\d{4}-\d{2}-\d{2}\.csv"$')
+        self.assertEqual((headers['X-Export-Rows'], headers['X-Export-Drafts']), ('2', '1'))
+        self.assertTrue(body.startswith(chr(0xfeff) + 'publication,'))
+        self.assertIn('Contacted · Email', body)
+        rows = json.loads(api_get(self.p, self.config, '/api/substack/export', {'format': 'json', 'scope': 'all'})[1])
+        self.assertEqual(sorted(r['contacted'][:9] for r in rows), ['', 'Contacted'])
+        self.assertEqual(api_get(self.p, self.config, '/api/substack/export', {'format': 'csv', 'scope': 'everyone'})[0], 400)
+
     def test_pending_claims_and_mock_cannot_approve(self):
         pid = self.pub(); self.research(pid)
         p = self.p.generate(pid)

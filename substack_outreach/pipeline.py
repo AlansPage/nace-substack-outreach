@@ -477,6 +477,9 @@ class Pipeline:
     def export(self, fmt="json", scope="pilot"):
         if fmt == "sendsheet":
             return self.sendsheet(scope)
+        return render_export(self.export_rows(scope), fmt)
+
+    def export_rows(self, scope="pilot"):
         rows = []
         clause = " WHERE pilot=1" if scope == "pilot" else " WHERE shortlisted=1" if scope == "shortlisted" else ""
         for r in self.store.db.execute("SELECT id FROM publications" + clause + " ORDER BY score DESC,id").fetchall():
@@ -486,18 +489,35 @@ class Pipeline:
                          "article_url": e.get("article_url", ""), "supporting_excerpt": e.get("supporting_excerpt", ""),
                          "angle": e.get("drex_connection", ""), "contact": p["contact_route"], "contact_source": p["contact_source_url"],
                          "subject": draft.get("subject", ""), "email_body": draft.get("plain_text_body", ""),
-                         "owner": p["owner"], "status": p["status"], "review_flags": draft.get("review_flags", e.get("review_flags", ["NEEDS_RESEARCH"]))})
-        if fmt == "json":
-            return json.dumps(rows, ensure_ascii=False, indent=2)
-        if fmt != "csv":
-            raise ValueError("Export format must be csv, json or sendsheet")
-        fields = ["publication", "author", "publication_url", "article_url", "supporting_excerpt", "angle", "contact", "contact_source", "subject", "email_body", "owner", "status", "review_flags"]
-        output = io.StringIO(newline="")
-        writer = csv.DictWriter(output, fieldnames=fields)
-        writer.writeheader()
-        for row in rows:
-            writer.writerow({k: csv_safe(dumps(v) if isinstance(v, list) else v) for k, v in row.items()})
-        return output.getvalue()
+                         "owner": p["owner"], "status": p["status"], "review_flags": draft.get("review_flags", e.get("review_flags", ["NEEDS_RESEARCH"])),
+                         "contacted": contacted_label(p["previous_contact"])})
+        return rows
+
+
+def contacted_label(history):
+    """Latest contact with this writer, e.g. "Contacted · LinkedIn · alice@nace.ai · 2026-10-20"."""
+    if not history:
+        return ""
+    c = history[0]
+    return " · ".join(str(v) for v in (c.get("event"), c.get("channel"), c.get("actor") or "", str(c.get("at") or "")[:10]) if v)
+
+
+EXPORT_FIELDS = ["publication", "author", "publication_url", "article_url", "supporting_excerpt", "angle", "contact", "contact_source",
+                 "subject", "email_body", "owner", "status", "contacted", "review_flags"]
+
+
+def render_export(rows, fmt):
+    if fmt == "json":
+        return json.dumps(rows, ensure_ascii=False, indent=2)
+    if fmt != "csv":
+        raise ValueError("Export format must be csv, json or sendsheet")
+    output = io.StringIO(newline="")
+    writer = csv.DictWriter(output, fieldnames=EXPORT_FIELDS)
+    writer.writeheader()
+    for row in rows:
+        writer.writerow({k: csv_safe(dumps(v) if isinstance(v, list) else v) for k, v in row.items()})
+    # The byte-order mark makes Excel on Windows read the file as UTF-8 (names, emoji, non-Latin scripts).
+    return "﻿" + output.getvalue()
 
 
 def mailto_link(to, subject, body):
