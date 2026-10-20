@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS source_rows (fingerprint TEXT, row_number INTEGER, pu
 CREATE TABLE IF NOT EXISTS articles (id {id}, publication_id {ref} NOT NULL REFERENCES publications(id),
   url TEXT NOT NULL, data TEXT NOT NULL, UNIQUE(publication_id,url));
 CREATE TABLE IF NOT EXISTS contacts (id {id}, author_key TEXT NOT NULL,
-  contact_key TEXT, channel TEXT, event TEXT, at TEXT, source TEXT, note TEXT, dedup TEXT UNIQUE);
+  contact_key TEXT, channel TEXT, event TEXT, at TEXT, source TEXT, note TEXT, dedup TEXT UNIQUE, actor TEXT);
 CREATE TABLE IF NOT EXISTS suppressions (key TEXT PRIMARY KEY, reason TEXT, at TEXT);
 CREATE TABLE IF NOT EXISTS identities (alias TEXT PRIMARY KEY, author_key TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS drafts (id {id}, publication_id {ref} NOT NULL REFERENCES publications(id),
@@ -40,6 +40,8 @@ CREATE TABLE IF NOT EXISTS events (id {id}, publication_id {ref}, kind TEXT, det
 CREATE INDEX IF NOT EXISTS pub_queue ON publications(pilot,score);
 CREATE INDEX IF NOT EXISTS pub_author ON publications(author_key)
 """
+# Columns added after the first release, for databases created before them.
+ADDED_COLUMNS = (("events", "actor"), ("contacts", "actor"))
 SQLITE_SCHEMA = TABLES.format(id="INTEGER PRIMARY KEY", ref="INTEGER", real="REAL")
 POSTGRES_SCHEMA = TABLES.format(id="BIGSERIAL PRIMARY KEY", ref="BIGINT", real="DOUBLE PRECISION")
 
@@ -67,6 +69,8 @@ def connect(url):
     if is_postgres(target):
         db = PgConnection(target)
         db.executescript(POSTGRES_SCHEMA)
+        for table, column in ADDED_COLUMNS:
+            db.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} TEXT")
         db.commit()
         return db
     Path(target).parent.mkdir(parents=True, exist_ok=True)
@@ -75,9 +79,10 @@ def connect(url):
     db.execute("PRAGMA foreign_keys=ON")
     db.execute("PRAGMA journal_mode=WAL")
     db.executescript(SQLITE_SCHEMA + ";")
-    # Databases created before events.actor existed gain the column; existing rows keep NULL.
-    if "actor" not in [r["name"] for r in db.execute("PRAGMA table_info(events)")]:
-        db.execute("ALTER TABLE events ADD COLUMN actor TEXT")
+    # Older databases gain the newer columns; existing rows keep NULL.
+    for table, column in ADDED_COLUMNS:
+        if column not in [r["name"] for r in db.execute(f"PRAGMA table_info({table})")]:
+            db.execute(f"ALTER TABLE {table} ADD COLUMN {column} TEXT")
     db.commit()
     return db
 

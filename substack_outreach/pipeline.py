@@ -16,6 +16,9 @@ from .store import Store, load_dnc
 from .workbook import find_workbook
 
 
+CONTACT_CHANNELS = ["Email", "X", "LinkedIn", "Substack DM", "Other"]
+
+
 class Pipeline:
     def __init__(self, config, actor=None):
         self.config = config
@@ -56,7 +59,10 @@ class Pipeline:
         items = []
         for r in rows:
             p = self.store.get(r[0])
-            items.append({k: p.get(k) for k in ("id", "publication", "author_name", "status", "fit_category", "fit_reasons", "owner", "score", "publication_url", "profile_url", "author_publications", "do_not_contact", "source_kind")})
+            item = {k: p.get(k) for k in ("id", "publication", "author_name", "status", "fit_category", "fit_reasons", "owner", "score", "publication_url", "profile_url", "author_publications", "do_not_contact", "source_kind")}
+            # Latest contact with this writer on any channel, shared across their publications.
+            item["contacted"] = {k: p["previous_contact"][0].get(k) for k in ("channel", "event", "at", "actor")} if p["previous_contact"] else None
+            items.append(item)
         return {"items": items, "total": total, "offset": offset}
 
     def dnc_list(self):
@@ -405,6 +411,21 @@ class Pipeline:
                     raise ValueError("Record a sent message before a reply")
                 self.store.record_contact(pub, "email", "Replied", data.get("source") or "Manual record in local review UI", data.get("note", ""))
                 pub["status"] = "Replied"
+            elif action == "contacted":
+                # The quick "Contacted" checkbox: any channel, who and when, so teammates never ping a writer twice.
+                if data.get("confirmed") is not True:
+                    raise ValueError("Tick Contacted to confirm this writer was reached")
+                if data.get("channel") not in CONTACT_CHANNELS:
+                    raise ValueError("Channel must be one of: " + ", ".join(CONTACT_CHANNELS))
+                link = str(data.get("link") or "").strip()
+                if link and not safe_url(link).startswith("https://"):
+                    raise ValueError("Link must be an https URL to the message or profile")
+                source = link or "Marked contacted in the workspace by " + (self.store.actor or "the local operator")
+                self.store.record_contact(pub, data["channel"], "Contacted", source, str(data.get("note") or ""),
+                                          dedup=digest([pub["author_key"], data["channel"], source, now()[:10]]))
+                self.store.invalidate(pid, "Writer marked contacted")
+                if pub["status"] in ("Approved", "Reviewed"):
+                    pub["status"] = "Drafted"
             elif action == "history":
                 if data.get("identity_alias"):
                     self.store.link_identity(pub, data["identity_alias"])

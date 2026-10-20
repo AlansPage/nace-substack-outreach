@@ -56,3 +56,10 @@ test('hosted workspace shows who is signed in, escapes it, and offers sign-in wh
   assert.ok(C.signInHTML().includes('href="/api/auth/login"'));
   assert.ok(C.proposalHTML({ status: 'proposed', contact_source_url: 'https://a.example/about', candidates: [] }, 'me@x.example').includes('value="me@x.example"'));
 });
+
+test('contacted marker shows channel, who and the date, escaped', () => {
+  assert.equal(C.contactedHTML(null), '');
+  const html = C.contactedHTML({ event: 'Contacted', channel: 'LinkedIn', actor: '<i>alice@example.com</i>', at: '2026-10-20T09:00:00+00:00' });
+  assert.ok(html.includes('LinkedIn') && html.includes('2026-10-20') && !html.includes('09:00'));
+  assert.ok(html.includes('&lt;i&gt;alice@example.com'));
+});

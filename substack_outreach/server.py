@@ -12,7 +12,7 @@ from urllib.parse import parse_qs, urlsplit
 from .common import FITS, STATUSES
 from .config import ROOT
 from .evidence import ASKS, prepare_evidence
-from .pipeline import Pipeline
+from .pipeline import CONTACT_CHANNELS, Pipeline
 
 JSON = "application/json; charset=utf-8"
 SECURITY_HEADERS = {"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
@@ -27,7 +27,8 @@ def api_get(pipeline, config, path, query):
             facts, _ = pipeline.facts()
             return 200, {"statuses": STATUSES, "fits": FITS, "asks": ASKS, "provider": config["provider"],
                          "sender": config["sender"], "facts": facts, "network_enabled": config["network_enabled"],
-                         "batch_size": config["batch_size"], "collect_contacts": config["collect_contacts"]}, JSON
+                         "batch_size": config["batch_size"], "collect_contacts": config["collect_contacts"],
+                         "contact_channels": CONTACT_CHANNELS}, JSON
         if path == "/api/substack/queue":
             return 200, pipeline.queue(query.get("scope", "pilot"), query.get("search", ""), query.get("status", ""),
                                        int(query.get("limit", 100)), int(query.get("offset", 0))), JSON
@@ -67,7 +68,8 @@ def encode(value):
 
 
 def serve(config, port=8765):
-    pipeline = Pipeline(config)
+    # One local operator: their configured sender name is who acted.
+    pipeline = Pipeline(config, actor=config["sender"]["name"])
     token = secrets.token_urlsafe(32)
 
     class Handler(BaseHTTPRequestHandler):

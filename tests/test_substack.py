@@ -277,6 +277,34 @@ class PipelineTests(unittest.TestCase):
         for flag in ('UNSUPPORTED_PROMISE_OR_PLACEHOLDER', 'PRODUCT_USE_CASE_SUPPORT_OR_LINK_MISSING'):
             self.assertIn(flag, d['validation']['blocking_flags'])
 
+    def test_contacted_checkbox_is_shared_and_blocks_other_teammates(self):
+        fx = json.loads((FIXTURES / 'contacted_marks.json').read_text(encoding='utf-8'))
+        a, b = self.pub('Main publication'), self.pub('Same author, second publication')
+        self.research(b); self.p.generate(b)
+        self.p.store.close()
+        alice = self.p = Pipeline(self.config, actor='alice@example.com')
+        for case in fx['invalid']:
+            with self.assertRaisesRegex(ValueError, case['error']):
+                alice.action(a, 'contacted', case['data'])
+        alice.action(a, 'contacted', fx['mark'])
+        alice.action(a, 'contacted', fx['mark'])  # same mark again on the same day is not a second contact
+        rows = alice.store.db.execute('SELECT channel,event,source,actor FROM contacts').fetchall()
+        self.assertEqual([tuple(r) for r in rows], [('LinkedIn', 'Contacted', 'https://www.linkedin.com/in/sam-example/', 'alice@example.com')])
+        listed = {i['id']: i['contacted'] for i in alice.queue()['items']}
+        self.assertEqual(listed[a]['actor'], 'alice@example.com')
+        self.assertEqual((listed[b]['channel'], listed[b]['event']), ('LinkedIn', 'Contacted'))
+        alice.store.close()
+        bob = self.p = Pipeline(self.config, actor='bob@example.com')
+        with self.assertRaisesRegex(ValueError, 'prior contact'):
+            bob.generate(b, regenerate=True)
+        self.assertIn('PREVIOUS_CONTACT_REVIEW_REQUIRED', bob.detail(b)['draft']['validation']['blocking_flags'])
+        third = self.pub('Different author', 'author:77')
+        # Same email means same person, so the unrelated writer needs its own route.
+        pub = bob.store.get(third); pub['contact_route'] = 'editor@different.example'; bob.store.save(pub); bob.store.db.commit()
+        self.assertEqual(bob.store.get(third)['previous_contact'], [])
+        bob.action(third, 'contacted', {'confirmed': True, 'channel': 'Email'})
+        self.assertEqual(bob.store.get(third)['previous_contact'][0]['source'], 'Marked contacted in the workspace by bob@example.com')
+
     def test_pending_claims_and_mock_cannot_approve(self):
         pid = self.pub(); self.research(pid)
         p = self.p.generate(pid)

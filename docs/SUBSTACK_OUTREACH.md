@@ -199,6 +199,8 @@ To change the sender, set that person's confirmed name and actual email together
 
 Author IDs and explicit profile links group publications. An explicit contact route or manually supplied identity alias can connect records. Approval is blocked when that author/contact already has an approved draft, any recorded previous contact, or an opt-out. Suppression applies across linked publications.
 
+**Contacted checkbox.** Whenever you reach a writer on any channel (email, X, LinkedIn, Substack DM or other), tick **Contacted this writer** at the top of their **Recipient & contact** card, choose the channel, optionally paste an https link to the message or profile, and press **Save contacted**. The mark records who (the signed-in email on the hosted workspace, the configured sender name locally) and when, and shows as a green **✓ Contacted** badge in everyone's list. It also covers the writer's other publications and anyone sharing the same contact email. Drafting to that writer is then blocked for everyone (`Generation blocked … prior contact`, `PREVIOUS_CONTACT_REVIEW_REQUIRED`). Saving the same mark twice on one day records it once. Marks are history, so there is no untick; record a correction as a note on a new mark.
+
 This worker cannot know that two different handles on different channels are the same person without a user-supplied mapping. Use **Previous contact & shared history**, or import a JSON list with `publication_id`, `channel`, `event`, `source`, and optional `at`, `note`, `identity_alias`. Do this before approving a contact researched through another channel. It imports historical records, not messages:
 
 ```powershell

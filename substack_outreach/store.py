@@ -100,8 +100,8 @@ class Store:
     def record_contact(self, data, channel, event, source, note="", at=None, dedup=None):
         if not channel or not source:
             raise ValueError("Contact channel and source are required")
-        self.db.execute("INSERT OR IGNORE INTO contacts(author_key,contact_key,channel,event,at,source,note,dedup) VALUES(?,?,?,?,?,?,?,?)",
-                        (data["author_key"], self.contact_key(data), channel, event, at or now(), source, note, dedup))
+        self.db.execute("INSERT OR IGNORE INTO contacts(author_key,contact_key,channel,event,at,source,note,dedup,actor) VALUES(?,?,?,?,?,?,?,?,?)",
+                        (data["author_key"], self.contact_key(data), channel, event, at or now(), source, note, dedup, self.actor))
         self.event(data["id"], "contact_recorded", {"channel": channel, "event": event})
 
     def link_identity(self, data, alias):
