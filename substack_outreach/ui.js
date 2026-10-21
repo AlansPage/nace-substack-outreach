@@ -25,8 +25,35 @@
   };
   // Hosted workspace: who is signed in, or the way in. Local mode has no user and shows nothing.
   const userHTML = user => user ? `<span class="ss-chip">Signed in as ${esc(user.email)} · <a href="/api/auth/logout">Sign out</a></span>` : '';
+  // Shared "already contacted" marker: shown in the list and on the writer's panel for every teammate.
+  const contactedHTML = c => c ? `<span class="ss-contacted">✓ ${esc(c.event || 'Contacted')} · ${esc(c.channel)} · ${esc(c.actor || 'not recorded who')} · ${esc(String(c.at || '').slice(0, 10))}</span>` : '';
   const signInHTML = () => 'Sign in to open the shared workspace. <a href="/api/auth/login">Sign in with Google</a>';
-  globalThis.SubstackUIHelpers = { esc, safeURL, link, wordCount, lengthLabel, previewHTML, proposalHTML, userHTML, signInHTML };
+  // Upload: accept the all-sheets JSON export, {headers, rows}, or a plain array of rows. Only tables with
+  // url/pub_id columns are Substack publications; the rest are reported as skipped. Batches stay well under
+  // the 4.5 MB request cap.
+  const uploadPlan = (data, maxChars = 1000000, maxRows = 5000) => {
+    const tables = Array.isArray(data) ? { upload: { rows: data } } : data && data.sheets ? data.sheets : { upload: data || {} };
+    const plan = { tables: [], skipped: [] };
+    for (const [sheet, table] of Object.entries(tables)) {
+      const rows = Array.isArray(table && table.rows) ? table.rows : [];
+      const headers = Array.isArray(table.headers) ? table.headers : [...new Set(rows.flatMap(r => Object.keys(r || {})).filter(k => k !== '_row'))];
+      if (!rows.length || !(headers.includes('url') || headers.includes('pub_id'))) { plan.skipped.push(sheet); continue; }
+      const batches = [];
+      let batch = [], size = 0;
+      for (const row of rows) {
+        const length = JSON.stringify(row).length;
+        if (batch.length && (size + length > maxChars || batch.length >= maxRows)) { batches.push(batch); batch = []; size = 0; }
+        batch.push(row); size += length;
+      }
+      if (batch.length) batches.push(batch);
+      plan.tables.push({ sheet, headers, rows: rows.length, batches });
+    }
+    return plan;
+  };
+  const exportName = (disposition, fallback) => (String(disposition || '').match(/filename="([^"\/]+)"/) || [])[1] || fallback;
+  const exportMessage = (name, rows, drafts) => `Exported ${name}: ${rows ?? '?'} rows, ${drafts ?? '?'} with an email draft. Check your Downloads folder.`
+    + (Number(drafts) === 0 ? ' No drafts yet: rows still need research or a generated draft, so subject and body columns are empty.' : '');
+  globalThis.SubstackUIHelpers = { esc, safeURL, link, wordCount, lengthLabel, previewHTML, proposalHTML, userHTML, signInHTML, contactedHTML, uploadPlan, exportName, exportMessage };
   if (typeof document === 'undefined') return;
   const root = document.getElementById('tab-substack');
   if (!root) return;
@@ -48,7 +75,7 @@
     root.innerHTML = `<header class="ss-hero"><div><p class="ss-eyebrow">NACE AI · LOCAL RESEARCH WORKSPACE</p><h1>Substack outreach</h1><p>Evidence first. A short, personal invitation. A human decision.</p></div><span class="ss-chip">Manual sending only</span></header>
       <div id="ss-message" class="ss-message" role="status" aria-live="polite">Connecting to local worker…</div>
       <div id="ss-stats" class="ss-stats"></div>
-      <div class="ss-toolbar"><label>Queue <select id="ss-scope"><option value="pilot">20-publication pilot</option><option value="shortlisted">Shortlist</option><option value="all">All imported + fixture</option></select></label><label>Status <select id="ss-status"><option value="">All statuses</option></select></label><label class="ss-search">Search <input id="ss-search" type="search" placeholder="Publication, author, topic"></label><button id="ss-refresh">Refresh</button><button data-export="csv">Export CSV</button><button data-export="json">Export JSON</button><button id="ss-contacts">Propose contacts from about pages</button></div>
+      <div class="ss-toolbar"><label>Queue <select id="ss-scope"><option value="pilot">20-publication pilot</option><option value="shortlisted">Shortlist</option><option value="all">All imported + fixture</option></select></label><label>Status <select id="ss-status"><option value="">All statuses</option></select></label><label class="ss-search">Search <input id="ss-search" type="search" placeholder="Publication, author, topic"></label><button id="ss-refresh">Refresh</button><button data-export="csv">Export CSV</button><button data-export="json">Export JSON</button><button id="ss-contacts">Propose contacts from about pages</button><button id="ss-upload">Upload JSON</button><input id="ss-upload-file" type="file" accept=".json,application/json" hidden></div>
       <div class="ss-layout"><aside class="ss-queue" aria-label="Publication queue"><div id="ss-list"></div><div class="ss-pagination"><button id="ss-prev">Previous</button><span id="ss-count"></span><button id="ss-next">Next</button></div></aside><section id="ss-detail" aria-label="Publication review"><div class="ss-empty"><h2>Choose a publication</h2><p>Review its sources, verify the name and contact route, then draft.</p><p>Subscriber counts are imported estimates. Metadata matches are only triage signals.</p></div></section></div>`;
   }
   async function start() {
@@ -64,6 +91,7 @@
       root.addEventListener('click', handleClick);
       root.addEventListener('change', e => { if (['ss-scope', 'ss-status'].includes(e.target.id)) { scope = val('scope'); offset = 0; refresh().catch(report); } });
       root.addEventListener('input', e => { if (['ss-subject', 'ss-body'].includes(e.target.id)) { dirty = true; $('#ss-length').textContent = lengthLabel(val('body')); $('#ss-rendered').innerHTML = previewHTML(val('body')); } });
+      $('#ss-upload-file').addEventListener('change', e => { const file = e.target.files[0]; e.target.value = ''; if (file) upload(file).catch(report); });
       $('#ss-search').addEventListener('keydown', e => { if (e.key === 'Enter') { offset = 0; refresh().catch(report); } });
       await refresh();
       notice(`${boot.hosted ? 'Shared workspace connected' : 'Local worker connected'} · ${boot.provider === 'mock' ? 'MOCK mode: previews cannot be approved' : 'Writing provider: ' + boot.provider} · Sender: ${boot.sender.name}, ${boot.sender.email} · Network ${boot.network_enabled ? 'permission-gated' : 'disabled'}`);
@@ -78,10 +106,49 @@
   async function refresh() {
     const [queue, metrics] = await Promise.all([api(`queue?scope=${encodeURIComponent(scope)}&search=${encodeURIComponent(val('search'))}&status=${encodeURIComponent(val('status'))}&offset=${offset}`), api('metrics')]);
     $('#ss-stats').innerHTML = [['Imported', metrics.imported_publications], ['Shortlisted', metrics.shortlisted_publications], ['Researched', metrics.research_completed], ['Draft versions', metrics.drafts_generated], ['Approved', metrics.drafts_approved]].map(([label, n]) => `<div><strong>${esc(n)}</strong><span>${label}</span></div>`).join('');
-    $('#ss-list').innerHTML = queue.items.map(p => `<button class="ss-row${selected?.id === p.id ? ' ss-selected' : ''}" data-pub="${p.id}"><span class="ss-row-title">${esc(p.publication || 'Unnamed publication')}</span><span>${esc(p.author_name || 'Author unknown')}</span><span class="ss-row-meta">${esc(p.fit_category)} · ${esc(p.status)}</span>${p.author_publications > 1 ? `<span class="ss-warning">${p.author_publications} publications share this author</span>` : ''}${p.do_not_contact ? '<span class="ss-warning">Do not contact</span>' : ''}</button>`).join('') || '<p class="ss-empty">No records in this queue. Run the pilot command to import the workbook.</p>';
+    $('#ss-list').innerHTML = queue.items.map(p => `<button class="ss-row${selected?.id === p.id ? ' ss-selected' : ''}" data-pub="${p.id}"><span class="ss-row-title">${esc(p.publication || 'Unnamed publication')}</span><span>${esc(p.author_name || 'Author unknown')}</span><span class="ss-row-meta">${esc(p.fit_category)} · ${esc(p.status)}</span>${p.author_publications > 1 ? `<span class="ss-warning">${p.author_publications} publications share this author</span>` : ''}${p.do_not_contact ? '<span class="ss-warning">Do not contact</span>' : ''}${contactedHTML(p.contacted)}</button>`).join('') || '<p class="ss-empty">No records in this queue. Run the pilot command to import the workbook.</p>';
     $('#ss-count').textContent = `${queue.total ? offset + 1 : 0}–${Math.min(offset + queue.items.length, queue.total)} / ${queue.total}`;
     $('#ss-prev').disabled = offset === 0;
     $('#ss-next').disabled = offset + 100 >= queue.total;
+  }
+  async function exportFile(format) {
+    notice(`Preparing the ${format.toUpperCase()} export…`);
+    const response = await fetch(`/api/substack/export?format=${format}&scope=${encodeURIComponent(scope)}`, { credentials: 'same-origin' });
+    if (!response.ok) {
+      const detail = await response.json().catch(() => ({}));
+      throw new Error(`Export failed: ${detail.error || 'worker returned ' + response.status}`);
+    }
+    const blob = await response.blob();
+    const name = exportName(response.headers.get('Content-Disposition'), `substack-${scope}.${format}`);
+    // The link must be in the page for Chrome, Edge and Firefox to start the download; keep the blob alive long enough.
+    const href = URL.createObjectURL(blob), anchor = Object.assign(document.createElement('a'), { href, download: name });
+    anchor.style.display = 'none';
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    setTimeout(() => URL.revokeObjectURL(href), 60000);
+    notice(exportMessage(name, response.headers.get('X-Export-Rows'), response.headers.get('X-Export-Drafts')));
+  }
+  async function upload(file) {
+    if (busy) return;
+    busy = true;
+    try {
+      notice(`Reading ${file.name}…`);
+      const plan = uploadPlan(JSON.parse(await file.text()));
+      if (!plan.tables.length) throw new Error(`No Substack table found in ${file.name} (needs url or pub_id columns). Skipped: ${plan.skipped.join(', ') || 'none'}`);
+      let inserted = 0, duplicates = 0, suppressed = 0;
+      for (const table of plan.tables) {
+        let offset = 0;
+        for (const [i, rows] of table.batches.entries()) {
+          notice(`Uploading ${table.sheet}: part ${i + 1} of ${table.batches.length} (${table.rows} rows). Keep this tab open.`);
+          const result = await api('upload', { sheet: table.sheet, headers: table.headers, rows, offset, last: i === table.batches.length - 1 });
+          inserted += result.inserted || 0; duplicates += result.duplicates || 0; suppressed += (result.dnc_suppressed || []).length;
+          offset += rows.length;
+        }
+      }
+      await refresh();
+      notice(`Upload done: ${inserted} new publications, ${duplicates} already known (their contacted marks, drafts and status are kept), ${suppressed} on the do-not-contact list.${plan.skipped.length ? ' Skipped (not Substack tables): ' + plan.skipped.join(', ') + '.' : ''}`);
+    } finally { busy = false; }
   }
   async function open(id) {
     if (dirty) throw new Error('Save the edited draft before switching publications.');
@@ -91,7 +158,7 @@
   function renderDetail() {
     const p = selected, d = p.draft, e = p.evidence || p.evidence_candidate || {}, v = d?.validation;
     $('#ss-detail').innerHTML = `<div class="ss-detail-head"><p class="ss-eyebrow">${esc(p.status)} · RECORD ${p.id}</p><h2>${esc(p.publication || 'Unnamed publication')}</h2><p>${esc(p.author_name || 'Author unknown')} · ${link(p.publication_url, 'Publication')} · ${link(p.profile_url, 'Substack profile')}</p><div class="ss-tags"><span class="ss-chip">${esc(p.fit_category)}</span>${p.source_kind === 'user_fixture' ? '<span class="ss-chip ss-warning">USER-SUPPLIED FIXTURE · NOT FETCHED</span>' : ''}</div><p>${p.fit_reasons.map(esc).join(' ')}</p></div>
-      <div class="ss-card"><h3>Recipient & contact</h3><div class="ss-form-grid">${field('author', 'Public author name', p.author_name)}${field('first', 'Confirmed public first name (leave blank if unknown)', p.confirmed_first_name)}${field('name-source', 'Name source URL or user-supplied provenance', p.name_source)}${field('owner', 'Owner', p.owner)}${field('contact', 'Published business/contact/submission route', p.contact_route)}${field('contact-source', 'Contact source URL or user-supplied provenance', p.contact_source_url)}${select('contact-kind', 'Route type', ['', 'business', 'contact', 'submission', 'user_supplied', 'sponsorship', 'reply_to'], p.contact_kind)}${select('fit', 'Fit category', boot.fits, p.fit_category)}</div><label><input id="ss-contact-confirmed" type="checkbox"${checked(p.contact_confirmed)}> I verified this published route or supplied it directly.</label>${proposalHTML(p.contact_route_proposed, boot.user?.email || '')}<p><button data-action="metadata">Save recipient & owner</button> <button data-action="dnc" class="ss-danger">Do not contact author</button></p><p class="ss-note">Sponsorship routes are kept separate from editorial pitches. Confirmed identity links and contacts apply across publications and channels.</p><details><summary>Previous contact (${p.previous_contact.length}) & shared history</summary><pre>${esc(JSON.stringify(p.previous_contact, null, 2))}</pre><div class="ss-form-grid">${field('history-channel', 'Channel (email, Reddit, X, …)')}${field('history-source', 'Source: message URL or supplied record')}${field('history-alias', 'Optional explicit shared identity key')}${field('history-note', 'Contact note')}</div><button data-action="history">Record previous contact</button></details></div>
+      <div class="ss-card"><h3>Recipient & contact</h3><div class="ss-contacted-box">${contactedHTML(p.previous_contact[0])}<label><input id="ss-contacted-check" type="checkbox"> Contacted this writer (email, X, LinkedIn, Substack DM, …). Teammates will see it and drafting to this writer is blocked.</label><div class="ss-form-grid">${select('contacted-channel', 'Channel', boot.contact_channels || ['Email'], 'Email')}${field('contacted-link', 'Link to the message or profile (optional, https)')}</div><button data-action="contacted">Save contacted</button></div><div class="ss-form-grid">${field('author', 'Public author name', p.author_name)}${field('first', 'Confirmed public first name (leave blank if unknown)', p.confirmed_first_name)}${field('name-source', 'Name source URL or user-supplied provenance', p.name_source)}${field('owner', 'Owner', p.owner)}${field('contact', 'Published business/contact/submission route', p.contact_route)}${field('contact-source', 'Contact source URL or user-supplied provenance', p.contact_source_url)}${select('contact-kind', 'Route type', ['', 'business', 'contact', 'submission', 'user_supplied', 'sponsorship', 'reply_to'], p.contact_kind)}${select('fit', 'Fit category', boot.fits, p.fit_category)}</div><label><input id="ss-contact-confirmed" type="checkbox"${checked(p.contact_confirmed)}> I verified this published route or supplied it directly.</label>${proposalHTML(p.contact_route_proposed, boot.user?.email || '')}<p><button data-action="metadata">Save recipient & owner</button> <button data-action="dnc" class="ss-danger">Do not contact author</button></p><p class="ss-note">Sponsorship routes are kept separate from editorial pitches. Confirmed identity links and contacts apply across publications and channels.</p><details><summary>Previous contact (${p.previous_contact.length}) & shared history</summary><pre>${esc(JSON.stringify(p.previous_contact, null, 2))}</pre><div class="ss-form-grid">${field('history-channel', 'Channel (email, Reddit, X, …)')}${field('history-source', 'Source: message URL or supplied record')}${field('history-alias', 'Optional explicit shared identity key')}${field('history-note', 'Contact note')}</div><button data-action="history">Record previous contact</button></details></div>
       <div class="ss-card"><h3>Article evidence</h3>${p.articles.length ? p.articles.map(a => `<div class="ss-source"><strong>${link(a.url, a.title || 'Untitled article')}</strong><p>${esc(a.date || 'Date unknown')} · ${esc(a.content_status)} · ${esc(a.source_kind)} · ${esc(a.byline || 'Byline unknown')}</p><blockquote>${esc(e.article_url === a.url ? e.supporting_excerpt : a.text.slice(0, 280))}</blockquote><details><summary>Collected text & provenance</summary><pre>${esc(a.text)}</pre><p>Retrieved: ${esc(a.retrieved_at)} · ${esc(a.permission_basis)} · ${link(a.source_url, 'Source')}</p></details></div>`).join('') : '<p>No collected article. Import supplied text or configure permitted publisher RSS.</p>'}
       <details><summary>Import article text or research export</summary><p>Paste a JSON array of up to five articles using the documented schema, or import the JSON file from the CLI. No article is fetched by this form.</p>${field('articles-json', 'Articles JSON', '[\n  {\n    "title": "", "url": "", "date": null, "byline": null,\n    "text": "", "content_status": "excerpt",\n    "source_kind": "manual", "source_url": "",\n    "permission_basis": "", "membership_confirmed": false,\n    "relationship_source": ""\n  }\n]', true)}<button data-action="research">Import research</button></details>
       <details><summary>Source permission & RSS settings</summary><p>Feed availability alone does not establish permission. The CLI collector also requires network_enabled=true.</p>${field('research-json', 'Permission record JSON', JSON.stringify(p.research && Object.keys(p.research).length ? p.research : { source_kind: 'publisher_rss', automated_use_permitted: false, permission_basis: '', permission_source_url: '', permission_review_date: '', feed_url: '' }, null, 2), true)}${field('publication-url', 'Resolved publication URL (not profile)', p.publication_url)}${field('publication-source', 'Evidence supporting publication URL', p.publication_url_source)}<button data-action="permission">Save source settings</button></details>
@@ -115,6 +182,7 @@
       busy = true;
       if (button.dataset.pub) return await open(Number(button.dataset.pub));
       if (button.id === 'ss-refresh') return await refresh();
+      if (button.id === 'ss-upload') { $('#ss-upload-file').click(); return; }
       if (button.id === 'ss-contacts') {
         notice('Reading about pages through the permission-gated collector…');
         const { results } = await api('collect-contacts', { batch: boot.batch_size });
@@ -124,12 +192,7 @@
         return await refresh();
       }
       if (button.id === 'ss-prev' || button.id === 'ss-next') { offset += button.id === 'ss-prev' ? -100 : 100; return await refresh(); }
-      if (button.dataset.export) {
-        const response = await fetch(`/api/substack/export?format=${button.dataset.export}&scope=${encodeURIComponent(scope)}`);
-        if (!response.ok) throw new Error('Export failed');
-        const blob = await response.blob(), url = URL.createObjectURL(blob), anchor = document.createElement('a');
-        anchor.href = url; anchor.download = `substack-${scope}.${button.dataset.export}`; anchor.click(); setTimeout(() => URL.revokeObjectURL(url), 1000); return;
-      }
+      if (button.dataset.export) return await exportFile(button.dataset.export);
       if (!button.dataset.action || !selected) return;
       let action = button.dataset.action, data = {};
       if (action === 'copy') {
@@ -140,6 +203,7 @@
       if (action === 'metadata') { action = 'update'; data = { author_name: val('author'), confirmed_first_name: val('first'), name_source: val('name-source'), owner: val('owner'), contact_route: val('contact'), contact_source_url: val('contact-source'), contact_kind: val('contact-kind'), contact_confirmed: tick('contact-confirmed'), fit_category: val('fit') }; }
       else if (action === 'permission') { action = 'update'; data = { research: JSON.parse(val('research-json')), publication_url: val('publication-url'), publication_url_source: val('publication-source') }; }
       else if (action === 'research') data = { articles: JSON.parse(val('articles-json')) };
+      else if (action === 'contacted') data = { confirmed: tick('contacted-check'), channel: val('contacted-channel'), link: val('contacted-link') };
       else if (['confirm-contact', 'dismiss-contact'].includes(action)) { data = { decision: action === 'confirm-contact' ? 'confirm' : 'dismiss', route: val('proposal-route'), contact_kind: val('proposal-kind'), reviewer: val('proposal-reviewer') }; action = 'contact_proposal'; }
       else if (action === 'evidence') {
         const a = selected.articles.find(a => a.url === val('article-choice'));

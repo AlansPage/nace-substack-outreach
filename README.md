@@ -72,6 +72,20 @@ each one in the UI before approval is possible. The send sheet only fills your m
 
 See [`docs/SUBSTACK_OUTREACH.md`](docs/SUBSTACK_OUTREACH.md) for each one.
 
+## Team page (shared on claude.ai)
+
+`team_page/` builds the page the team uses to split the work: every Substack writer from the export, ranked, with
+**Claim**, **Mark contacted** and **Draft email** (Claude). Claims and contact records are shared live through the
+Artifact's database, so nobody writes to the same creator twice. The built page contains the workbook's rows, so it
+is written to `.local\` and never committed:
+
+```powershell
+py -3.12 team_page\build_team_page.py D:\substack-outreach-private\substack.json
+```
+
+Publish the output as a private Artifact (capabilities in the script's docstring) and share it with teammates as
+Contributors. The drafts use the pitch stored in the Artifact's `settings/pitch` document.
+
 ## Hosted team workspace (optional)
 
 The same code deploys to Vercel for a shared workspace: Google sign-in, a Neon Postgres database
@@ -82,10 +96,10 @@ Setup steps are in [`docs/SUBSTACK_OUTREACH.md`](docs/SUBSTACK_OUTREACH.md#hoste
 
 | Hosted piece | Location |
 |---|---|
-| Vercel function | `api/index.py` → `substack_outreach/hosted.py` |
+| Vercel entry point (WSGI `app`) | `app.py` → `substack_outreach/hosted.py` |
 | Google sign-in and sessions | `substack_outreach/auth.py` |
 | SQLite / Postgres storage | `substack_outreach/db.py` |
-| Build and routing | `vercel.json`, `requirements.txt`, `.python-version`, `.vercelignore` |
+| Entry point, dependency and upload filter | `pyproject.toml` (`[tool.vercel] entrypoint`), `.python-version`, `.vercelignore` |
 
 ## The facts registry
 

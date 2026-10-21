@@ -45,6 +45,12 @@ Local triage matches terms in the name, description, categories and author bio. 
 
 `import` and `pilot` apply the list on every run, including a resumed workbook, through the same suppression as **Do not contact author**: the author and every linked publication become `Do not contact` and leave the shortlist. A personal newsletter written by a vendor employee is not vendor-owned; do not list it unless the team decides so.
 
+### Upload JSON from the workspace
+
+**Upload JSON** in the toolbar loads a Substack table without the command line, locally or on the hosted workspace. It accepts the Substack-only export (`{"sheets": {"substack": {"headers": [...], "rows": [...]}}}`, each row with its Excel `_row`), a `{headers, rows}` object, or a plain array of row objects with the workbook's column names. Only tables with a `url` or `pub_id` column are treated as Substack publications; any other table in the file is skipped and named in the result. The browser sends the rows in parts of about 1 MB (Vercel caps a request at 4.5 MB); 15,617 rows take about 15 requests.
+
+Uploads never replace what the team has done. Rows already known (same `pub_id` or publication URL) keep their status, research, drafts, owner and every **✓ Contacted** mark; uploading an identical part again is recognised and skipped; a newer file only adds new publications. Contacted marks belong to the writer, so a new publication by someone already contacted shows the mark too. The do-not-contact list and the shortlist run after the last part. Updated subscriber counts in a newer file are kept in the import history but do not overwrite the stored publication.
+
 ## Review workflow
 
 1. Open a pilot publication. Verify its actual publication URL, public first name and explicit published business/contact/submission route. Store source URLs, or label directly user-supplied provenance. Do not derive a person's identity from a handle. Unknown names use a neutral mock/manual greeting and a review flag; live writing requires a confirmed name.
@@ -199,6 +205,8 @@ To change the sender, set that person's confirmed name and actual email together
 
 Author IDs and explicit profile links group publications. An explicit contact route or manually supplied identity alias can connect records. Approval is blocked when that author/contact already has an approved draft, any recorded previous contact, or an opt-out. Suppression applies across linked publications.
 
+**Contacted checkbox.** Whenever you reach a writer on any channel (email, X, LinkedIn, Substack DM or other), tick **Contacted this writer** at the top of their **Recipient & contact** card, choose the channel, optionally paste an https link to the message or profile, and press **Save contacted**. The mark records who (the signed-in email on the hosted workspace, the configured sender name locally) and when, and shows as a green **✓ Contacted** badge in everyone's list. It also covers the writer's other publications and anyone sharing the same contact email. Drafting to that writer is then blocked for everyone (`Generation blocked … prior contact`, `PREVIOUS_CONTACT_REVIEW_REQUIRED`). Saving the same mark twice on one day records it once. Marks are history, so there is no untick; record a correction as a note on a new mark.
+
 This worker cannot know that two different handles on different channels are the same person without a user-supplied mapping. Use **Previous contact & shared history**, or import a JSON list with `publication_id`, `channel`, `event`, `source`, and optional `at`, `note`, `identity_alias`. Do this before approving a contact researched through another channel. It imports historical records, not messages:
 
 ```powershell
@@ -252,13 +260,13 @@ Metrics report imported/shortlisted publications, research completion and failed
 
 ## Hosted team workspace (Vercel)
 
-The same workspace can run on Vercel so teammates share one database. Hosted mode uses Postgres (Neon from the Vercel Marketplace) through the pure-Python `pg8000` driver, the only package in `requirements.txt`; the local worker still needs no packages. Nothing sends email in either mode.
+The same workspace can run on Vercel so teammates share one database. Hosted mode uses Postgres (Neon from the Vercel Marketplace) through the pure-Python `pg8000` driver, the only dependency in `pyproject.toml` (and `requirements.txt`); the local worker still needs no packages. Nothing sends email in either mode.
 
 **Who can see what.** Sign-in is open to any Google account unless you restrict it. Everyone who signs in can read the facts registry (including unreleased numbers and launch timing), every contact route and draft, and can approve drafts and record sends. Every action is recorded with the signed-in email in `events.actor`. Set `ALLOWED_EMAIL_DOMAIN=nace.ai` (checked against Google's `hd` claim) or `ALLOWED_EMAILS=a@nace.ai,b@nace.ai` to restrict sign-in; no code change is needed.
 
 ### 1. Create the project and database
 
-1. On vercel.com: **Add New → Project**, import `AlansPage/nace-substack-outreach`. `vercel.json` sets the build (`python3 build.py`, output `public/`) and sends every `/api/*` request to `api/index.py` with a 300-second limit.
+1. On vercel.com: **Add New → Project**, import `AlansPage/nace-substack-outreach`, Framework Preset **Other**, no build command. `pyproject.toml` names the entry point (`[tool.vercel] entrypoint = "app:app"`): every request, including the page at `/`, goes to the WSGI `app` in `app.py`, which renders the page itself. There is no `api/` folder and no `vercel.json`: new Vercel projects no longer turn `api/*.py` files into functions, and a leftover `functions` entry fails the build with `unused_function`.
 2. In the project: **Storage → Marketplace → Neon → Connect**. Vercel adds `DATABASE_URL` to the project's environment variables. The tables are created on first use.
 
 ### 2. Create the Google sign-in client

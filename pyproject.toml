@@ -1,0 +1,10 @@
+[project]
+name = "substack-outreach"
+version = "0.1.0"
+description = "Local-first Substack research and outreach workspace; optional hosted team mode on Vercel"
+requires-python = ">=3.12"
+# Hosted mode only (Vercel + Postgres). The local worker never imports it and needs no packages.
+dependencies = ["pg8000==1.31.2"]
+
+[tool.vercel]
+entrypoint = "app:app"

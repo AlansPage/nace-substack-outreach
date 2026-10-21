@@ -71,7 +71,7 @@ def main():
         from .server import serve
         serve(config, args.port)
         return
-    pipeline = Pipeline(config)
+    pipeline = Pipeline(config, actor=config["sender"]["name"])
     try:
         if args.command == "pilot":
             result = pipeline.pilot(args.input, args.batch, args.shortlist)

@@ -56,3 +56,32 @@ test('hosted workspace shows who is signed in, escapes it, and offers sign-in wh
   assert.ok(C.signInHTML().includes('href="/api/auth/login"'));
   assert.ok(C.proposalHTML({ status: 'proposed', contact_source_url: 'https://a.example/about', candidates: [] }, 'me@x.example').includes('value="me@x.example"'));
 });
+
+test('contacted marker shows channel, who and the date, escaped', () => {
+  assert.equal(C.contactedHTML(null), '');
+  const html = C.contactedHTML({ event: 'Contacted', channel: 'LinkedIn', actor: '<i>alice@example.com</i>', at: '2026-10-20T09:00:00+00:00' });
+  assert.ok(html.includes('LinkedIn') && html.includes('2026-10-20') && !html.includes('09:00'));
+  assert.ok(html.includes('&lt;i&gt;alice@example.com'));
+});
+
+test('upload plan takes the substack sheet of the all-channels export and batches it', () => {
+  const sample = JSON.parse(fs.readFileSync('tests/fixtures/all_channels_sample.json', 'utf8'));
+  const plan = C.uploadPlan(sample);
+  assert.deepEqual([...plan.skipped], ['Discord', 'mediun', 'Copy of hackernoon']);
+  assert.equal(plan.tables.length, 1);
+  assert.equal(plan.tables[0].sheet, 'substack');
+  assert.equal(plan.tables[0].rows, 3);
+  assert.deepEqual([...plan.tables[0].headers], sample.sheets.substack.headers);
+  const small = C.uploadPlan(sample, 1500);
+  assert.ok(small.tables[0].batches.length > 1);
+  assert.equal(small.tables[0].batches.flat().length, 3);
+  assert.equal(C.uploadPlan([{ url: 'https://a.substack.com', name: 'A' }]).tables[0].sheet, 'upload');
+});
+
+test('export names the file from the server and says when there are no drafts yet', () => {
+  assert.equal(C.exportName('attachment; filename="substack-pilot-2026-10-20.csv"', 'x.csv'), 'substack-pilot-2026-10-20.csv');
+  assert.equal(C.exportName(null, 'substack-pilot.csv'), 'substack-pilot.csv');
+  assert.equal(C.exportName('attachment; filename="../../evil.csv"', 'safe.csv'), 'safe.csv');
+  assert.ok(C.exportMessage('a.csv', '20', '0').includes('No drafts yet'));
+  assert.ok(!C.exportMessage('a.csv', '20', '3').includes('No drafts yet'));
+});

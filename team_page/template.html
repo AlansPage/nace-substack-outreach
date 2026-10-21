@@ -1,0 +1,451 @@
+<title>Substack Outreach</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:opsz,wght@6..72,500;6..72,600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: a working list on the left, the selected writer's record and draft on the right; one column on phones. */
+:root {
+  --bg: #f2f4f3; --surface: #ffffff; --raised: #e8ecea; --line: #d3dad7; --fg: #17211d; --muted: #5b6a64;
+  --accent: #0d6b5a; --accent-fg: #ffffff; --accent-soft: #d8ece7;
+  --claimed: #8a5a00; --claimed-bg: #fbedcf; --contacted: #1d4f91; --contacted-bg: #dde8f7;
+  --replied: #1f6b2f; --replied-bg: #dcefdf; --stop: #9b2c22; --stop-bg: #f6dedb;
+  --display: "Newsreader", Georgia, "Times New Roman", serif;
+  --body: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #121815; --surface: #1a221e; --raised: #222c27; --line: #33403a; --fg: #e5ece8; --muted: #9aaba3;
+  --accent: #5cc2ab; --accent-fg: #0d1a16; --accent-soft: #1d3a33;
+  --claimed: #f0c46a; --claimed-bg: #3a2f17; --contacted: #8db7f0; --contacted-bg: #1c2b40;
+  --replied: #86d394; --replied-bg: #1d3524; --stop: #f19a90; --stop-bg: #3d1f1c; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #121815; --surface: #1a221e; --raised: #222c27; --line: #33403a; --fg: #e5ece8; --muted: #9aaba3;
+  --accent: #5cc2ab; --accent-fg: #0d1a16; --accent-soft: #1d3a33;
+  --claimed: #f0c46a; --claimed-bg: #3a2f17; --contacted: #8db7f0; --contacted-bg: #1c2b40;
+  --replied: #86d394; --replied-bg: #1d3524; --stop: #f19a90; --stop-bg: #3d1f1c; color-scheme: dark }
+* { box-sizing: border-box }
+body { background: var(--bg); color: var(--fg); font: 14px/1.5 var(--body); }
+.wrap { max-width: 1320px; margin: 0 auto; padding-block: 20px 40px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); display: grid; gap: 16px }
+header { display: flex; flex-wrap: wrap; align-items: end; justify-content: space-between; gap: 12px }
+h1 { font: 600 30px/1.1 var(--display); margin: 0; text-wrap: balance; letter-spacing: -0.3px }
+.sub { color: var(--muted); margin: 4px 0 0 }
+.me { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px }
+.me img { width: 26px; height: 26px; border-radius: 50% }
+.stats { display: flex; flex-wrap: wrap; gap: 8px }
+.stat { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; min-width: 110px }
+.stat b { display: block; font: 600 20px/1.2 var(--mono); font-variant-numeric: tabular-nums }
+.stat span { color: var(--muted); font-size: 12px }
+.banner { background: var(--claimed-bg); color: var(--claimed); border-radius: 8px; padding: 10px 14px; font-size: 13px }
+.toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center }
+.tabs { display: flex; flex-wrap: wrap; gap: 4px; background: var(--raised); padding: 4px; border-radius: 9px }
+.tabs button { border: 0; background: transparent; color: var(--fg); padding: 6px 11px; border-radius: 6px; font: 500 13px var(--body); cursor: pointer }
+.tabs button[aria-pressed="true"] { background: var(--surface); box-shadow: 0 1px 2px rgba(0,0,0,.12) }
+.tabs button small { color: var(--muted); font-family: var(--mono); margin-left: 4px }
+input, select, textarea { font: 14px var(--body); color: var(--fg); background: var(--surface); border: 1px solid var(--line); border-radius: 7px; padding: 8px 10px; min-width: 0 }
+input:focus-visible, select:focus-visible, textarea:focus-visible, button:focus-visible, .row:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px }
+#search { flex: 1 1 240px }
+.layout { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 16px; align-items: start }
+.list { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; min-width: 0 }
+.row { display: grid; grid-template-columns: 44px minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 10px 14px; border-bottom: 1px solid var(--line); cursor: pointer }
+.row:hover { background: var(--raised) }
+.row[aria-selected="true"] { background: var(--accent-soft) }
+.rank { font: 500 12px var(--mono); color: var(--muted); text-align: right; font-variant-numeric: tabular-nums }
+.who { min-width: 0 }
+.who strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+.who span { display: block; color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+.chips { display: flex; gap: 6px; align-items: center; justify-content: end; flex-wrap: wrap }
+.chip { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 99px; white-space: nowrap; background: var(--raised); color: var(--muted) }
+.chip.S { background: var(--accent-soft); color: var(--accent) }
+.chip.Claimed { background: var(--claimed-bg); color: var(--claimed) }
+.chip.Contacted { background: var(--contacted-bg); color: var(--contacted) }
+.chip.Replied { background: var(--replied-bg); color: var(--replied) }
+.chip.Stop { background: var(--stop-bg); color: var(--stop) }
+.pager { display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; color: var(--muted); font-size: 12px }
+button.btn { border: 1px solid var(--line); background: var(--surface); color: var(--fg); border-radius: 7px; padding: 7px 12px; font: 500 13px var(--body); cursor: pointer }
+button.btn:hover:not(:disabled) { background: var(--raised) }
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg) }
+button.primary:hover:not(:disabled) { background: var(--accent); filter: brightness(1.08) }
+button.danger { color: var(--stop) }
+button:disabled { opacity: .5; cursor: default }
+.detail { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 18px; display: grid; gap: 16px; position: sticky; top: calc(env(safe-area-inset-top, 0px) + 12px); max-height: calc(100vh - 24px); overflow: auto; min-width: 0 }
+.detail h2 { font: 600 22px/1.2 var(--display); margin: 0; text-wrap: balance }
+.meta { color: var(--muted); font-size: 13px; display: flex; flex-wrap: wrap; gap: 4px 14px }
+.meta a { color: var(--accent); overflow-wrap: anywhere }
+.desc { margin: 0; overflow-wrap: anywhere }
+section { display: grid; gap: 10px; border-top: 1px solid var(--line); padding-top: 14px }
+section h3 { margin: 0; font-size: 12px; text-transform: uppercase; letter-spacing: 1px; color: var(--muted) }
+.owner { display: flex; align-items: center; gap: 10px; flex-wrap: wrap }
+.owner img { width: 28px; height: 28px; border-radius: 50% }
+.grid2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px }
+label.f { display: grid; gap: 4px; font-size: 12px; color: var(--muted); font-weight: 500; min-width: 0 }
+label.f > * { color: var(--fg) }
+textarea { resize: vertical; line-height: 1.55 }
+#draftBody { min-height: 220px; font-family: var(--body) }
+.actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center }
+.note { color: var(--muted); font-size: 12px; margin: 0 }
+.warn { background: var(--stop-bg); color: var(--stop); border-radius: 7px; padding: 8px 10px; font-size: 13px; margin: 0 }
+.empty { padding: 28px 18px; color: var(--muted); text-align: center }
+.toast { position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(env(safe-area-inset-bottom, 0px) + 18px); background: var(--fg); color: var(--bg); padding: 9px 14px; border-radius: 8px; font-size: 13px; max-width: calc(100% - 32px) }
+.back { display: none }
+@media (max-width: 860px) {
+  .layout { grid-template-columns: minmax(0, 1fr) }
+  .detail { position: static; max-height: none }
+  .layout.open .list, .layout.open .toolbar-under { display: none }
+  .layout:not(.open) .detail { display: none }
+  .back { display: inline-block }
+  .grid2 { grid-template-columns: minmax(0, 1fr) }
+}
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important } }
+</style>
+
+<div class="wrap">
+  <header>
+    <div>
+      <h1>Substack Outreach</h1>
+      <p class="sub">Pick a writer, claim them, draft the email, mark them contacted. The whole team sees it live.</p>
+    </div>
+    <div class="me" id="me"></div>
+  </header>
+  <div class="stats" id="stats"></div>
+  <p class="banner" id="banner" hidden></p>
+  <div class="toolbar">
+    <div class="tabs" id="tabs" role="group" aria-label="Which writers to show"></div>
+    <input id="search" type="search" placeholder="Search publication, author or topic" aria-label="Search writers">
+  </div>
+  <div class="layout" id="layout">
+    <div class="list" id="list" aria-label="Writers"></div>
+    <aside class="detail" id="detail" aria-live="polite"></aside>
+  </div>
+</div>
+<div class="toast" id="toast" role="status" hidden></div>
+
+<script type="application/json" id="writers-data">__WRITERS__</script>
+<script>
+(() => {
+  // Each writer: [key, publication, author, url, subscribers, fit, signals, description, language, doNotContact, shortlist]
+  const RAW = JSON.parse(document.getElementById('writers-data').textContent);
+  const W = RAW.map((r, i) => ({ key: r[0], name: r[1], author: r[2], url: r[3], subs: r[4], fit: r[5], signals: r[6],
+    desc: r[7], lang: r[8], dnc: !!r[9], short: !!r[10], rank: i + 1 }));
+  const BY_KEY = new Map(W.map(w => [w.key, w]));
+  const FIT = { S: 'Strong fit', R: 'Relevant', E: 'Exploratory', U: 'Unrelated', I: 'Little info' };
+  const STATUSES = ['Claimed', 'Contacted', 'Replied', 'Not a fit', 'Do not contact'];
+  const CHANNELS = ['Email', 'X', 'LinkedIn', 'Substack DM', 'Other'];
+  const ASKS = {
+    'Technical walkthrough': 'Would a short technical walkthrough of this use case be useful for your readers?',
+    'Review': 'Would you be open to trying it and sharing what you think?',
+    'Roundup': 'Would you consider it for a roundup of tools in this space?',
+    'Sponsored post': 'Would you be open to a sponsored post about it?',
+  };
+  const PAGE = 50;
+  const state = { view: 'short', q: '', page: 0, sel: null, team: new Map(), pitch: null, me: null, canWrite: null,
+    db: null, user: null, sample: null, teamReady: false, names: {}, busy: false, draft: null, drafting: null };
+  const $ = id => document.getElementById(id);
+  const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const today = () => new Date().toISOString().slice(0, 10);
+  const fmt = n => n == null ? '' : n >= 1000 ? (n >= 100000 ? Math.round(n / 1000) + 'k' : (n / 1000).toFixed(1).replace(/\.0$/, '') + 'k') : String(n);
+  const toast = msg => { const t = $('toast'); t.textContent = msg; t.hidden = false; clearTimeout(toast.t); toast.t = setTimeout(() => t.hidden = true, 3500); };
+  const rec = key => state.team.get(key) || {};
+  const statusOf = w => w.dnc ? 'Do not contact' : (rec(w.key).status || '');
+  const ownerOf = w => rec(w.key).owner || null;
+  const taken = w => !!ownerOf(w) || ['Contacted', 'Replied', 'Do not contact'].includes(statusOf(w)) || w.dnc;
+  const nameOf = id => id ? (id === state.me?.id ? 'You' : (state.names[id]?.name || 'A teammate')) : '';
+
+  const VIEWS = [
+    ['short', 'Shortlist', w => w.short],
+    ['fit', 'Best fit', w => w.fit !== 'U' && w.fit !== 'I'],
+    ['free', 'Available', w => (w.short || (w.fit !== 'U' && w.fit !== 'I')) && !taken(w)],
+    ['mine', 'Mine', w => !!state.me?.id && ownerOf(w) === state.me.id],
+    ['done', 'Contacted', w => ['Contacted', 'Replied'].includes(statusOf(w))],
+    ['all', 'All', () => true],
+  ];
+
+  function visible() {
+    const test = VIEWS.find(v => v[0] === state.view)[2];
+    const q = state.q.trim().toLowerCase();
+    return W.filter(w => test(w) && (!q || (w.name + ' ' + w.author + ' ' + w.signals + ' ' + w.desc + ' ' + w.url).toLowerCase().includes(q)));
+  }
+
+  async function resolveNames() {
+    if (!state.user) return;
+    const ids = new Set();
+    state.team.forEach(r => { if (r.owner) ids.add(r.owner); if (r.updatedBy) ids.add(r.updatedBy); if (r.draftBy) ids.add(r.draftBy); });
+    if (!ids.size) return;
+    const before = JSON.stringify(Object.keys(state.names).map(k => [k, state.names[k].name]));
+    state.names = await state.user.profiles([...ids]);
+    if (JSON.stringify(Object.keys(state.names).map(k => [k, state.names[k].name])) !== before) render();
+  }
+
+  function renderStats() {
+    let claimed = 0, contacted = 0, mine = 0;
+    state.team.forEach(r => {
+      if (r.owner) claimed++;
+      if (['Contacted', 'Replied'].includes(r.status)) contacted++;
+      if (r.owner && r.owner === state.me?.id) mine++;
+    });
+    const items = [['Shortlist', W.filter(w => w.short).length], ['Best fit', W.filter(w => w.fit !== 'U' && w.fit !== 'I').length],
+      ['Claimed', state.teamReady ? claimed : '…'], ['Contacted', state.teamReady ? contacted : '…'], ['Yours', state.teamReady ? mine : '…']];
+    $('stats').innerHTML = items.map(([l, n]) => `<div class="stat"><b>${esc(n)}</b><span>${esc(l)}</span></div>`).join('');
+  }
+
+  function renderTabs() {
+    $('tabs').innerHTML = VIEWS.map(([id, label, test]) =>
+      `<button type="button" data-view="${id}" aria-pressed="${state.view === id}">${esc(label)}<small>${W.filter(test).length}</small></button>`).join('');
+  }
+
+  function chipsFor(w) {
+    const out = [];
+    const s = statusOf(w);
+    if (s === 'Do not contact') out.push('<span class="chip Stop">Do not contact</span>');
+    else if (s === 'Contacted' || s === 'Replied') out.push(`<span class="chip ${s}">${esc(s)}${ownerOf(w) ? ' · ' + esc(nameOf(ownerOf(w))) : ''}</span>`);
+    else if (s === 'Not a fit') out.push('<span class="chip">Not a fit</span>');
+    else if (ownerOf(w)) out.push(`<span class="chip Claimed">${esc(nameOf(ownerOf(w)))}</span>`);
+    if (w.fit === 'S' || w.fit === 'R') out.push(`<span class="chip ${w.fit === 'S' ? 'S' : ''}">${FIT[w.fit]}</span>`);
+    return out.join('');
+  }
+
+  function renderList() {
+    const rows = visible();
+    const pages = Math.max(1, Math.ceil(rows.length / PAGE));
+    state.page = Math.min(state.page, pages - 1);
+    const slice = rows.slice(state.page * PAGE, state.page * PAGE + PAGE);
+    if (!rows.length) {
+      $('list').innerHTML = `<p class="empty">${state.view === 'mine' ? 'You have not claimed anyone yet. Open a writer and press Claim.' : 'No writers match. Try another tab or a shorter search.'}</p>`;
+      return;
+    }
+    $('list').innerHTML = slice.map(w => `<div class="row" role="button" tabindex="0" data-key="${esc(w.key)}" aria-selected="${state.sel === w.key}">
+        <span class="rank">${w.rank}</span>
+        <span class="who"><strong>${esc(w.name || w.url)}</strong><span>${esc(w.author)}${w.subs != null ? ' · ' + fmt(w.subs) + ' subscribers' : ''}</span></span>
+        <span class="chips">${chipsFor(w)}</span></div>`).join('')
+      + `<div class="pager"><button class="btn" type="button" data-page="-1" ${state.page === 0 ? 'disabled' : ''}>Previous</button>
+         <span>${state.page * PAGE + 1}–${Math.min(rows.length, (state.page + 1) * PAGE)} of ${rows.length}</span>
+         <button class="btn" type="button" data-page="1" ${state.page >= pages - 1 ? 'disabled' : ''}>Next</button></div>`;
+  }
+
+  function firstName(author) {
+    const word = String(author || '').trim().split(/\s+/)[0] || '';
+    return /^[A-Z][a-zA-Z'’-]{1,20}$/.test(word) ? word : '';
+  }
+
+  function renderDetail() {
+    const d = $('detail');
+    const w = BY_KEY.get(state.sel);
+    if (!w) {
+      d.innerHTML = `<h2>Choose a writer</h2><p class="note">The list starts with the 250 best-fit Substack writers from your workbook. Open one to claim it, draft the email and record the contact.</p>
+        <p class="note">Claimed and contacted writers show the teammate's name in the list, so nobody writes to the same person twice.</p>`;
+      return;
+    }
+    const r = rec(w.key), owner = r.owner || null, mine = owner && owner === state.me?.id;
+    const status = statusOf(w);
+    const someoneElse = owner && !mine;
+    const locked = w.dnc || ['Contacted', 'Replied', 'Do not contact'].includes(status) && !mine;
+    const canWrite = state.db && state.canWrite !== false && state.me?.id;
+    let ownerBlock;
+    if (w.dnc) ownerBlock = `<p class="warn">Vendor-owned publication on the do-not-contact list. Don't reach out.</p>`;
+    else if (!state.db) ownerBlock = `<p class="note">Team tracking isn't available in this view. Open the page signed in to claude.ai to claim writers.</p>`;
+    else if (!state.teamReady) ownerBlock = `<p class="note">Loading who has this writer…</p>`;
+    else if (!owner) ownerBlock = `<div class="owner"><span>Nobody has this writer yet.</span>${canWrite ? '<button class="btn primary" type="button" data-act="claim">Claim this writer</button>' : ''}</div>`;
+    else ownerBlock = `<div class="owner"><span><strong>${esc(nameOf(owner))}</strong> ${mine ? 'have' : 'has'} this writer${r.claimedAt ? ' since ' + esc(r.claimedAt.slice(0, 10)) : ''}.</span>
+        ${mine ? '<button class="btn" type="button" data-act="release">Release</button>' : ''}</div>
+        ${someoneElse ? `<p class="warn">Claimed by ${esc(nameOf(owner))}. Don't contact this writer unless they hand it over.</p>` : ''}`;
+    const editable = canWrite && !w.dnc && (mine || !owner);
+    const opt = (list, val) => ['<option value="">—</option>'].concat(list.map(x => `<option${x === val ? ' selected' : ''}>${esc(x)}</option>`)).join('');
+    const draft = state.draft && state.draft.key === w.key ? state.draft : { subject: r.draftSubject || '', body: r.draftBody || '' };
+    const pitchReady = state.pitch && state.pitch.product;
+    d.innerHTML = `<div class="actions"><button class="btn back" type="button" data-act="back">← Back to list</button></div>
+      <div><h2>${esc(w.name || w.url)}</h2>
+        <div class="meta"><span>${esc(w.author || 'Author unknown')}</span>${w.subs != null ? `<span>${fmt(w.subs)} subscribers (estimate)</span>` : ''}
+        <span>#${w.rank} · ${FIT[w.fit]}</span>${w.url ? `<a href="${esc(w.url)}" target="_blank" rel="noopener noreferrer">${esc(w.url.replace(/^https:\/\//, ''))}</a>` : ''}</div></div>
+      ${w.desc ? `<p class="desc">${esc(w.desc)}</p>` : ''}
+      ${w.signals ? `<p class="note">Topic signals: ${esc(w.signals)}</p>` : ''}
+      <section><h3>Who has this writer</h3>${ownerBlock}</section>
+      <section><h3>Contact record</h3>
+        <div class="grid2">
+          <label class="f">Status<select id="fStatus" ${editable ? '' : 'disabled'}>${opt(STATUSES, status)}</select></label>
+          <label class="f">Channel<select id="fChannel" ${editable ? '' : 'disabled'}>${opt(CHANNELS, r.channel)}</select></label>
+          <label class="f">Contacted on<input id="fDate" type="date" value="${esc(r.contactedOn || '')}" ${editable ? '' : 'disabled'}></label>
+          <label class="f">Contact used<input id="fContact" type="text" placeholder="Email address or profile link" value="${esc(r.contactUsed || '')}" ${editable ? '' : 'disabled'}></label>
+        </div>
+        <label class="f">Notes<textarea id="fNotes" rows="3" ${editable ? '' : 'disabled'}>${esc(r.notes || '')}</textarea></label>
+        <div class="actions">${editable ? '<button class="btn primary" type="button" data-act="save">Save record</button><button class="btn" type="button" data-act="contacted">Mark contacted today</button>' : ''}
+          ${r.updatedBy ? `<span class="note">Last change by ${esc(nameOf(r.updatedBy))}${r.updatedAt ? ', ' + esc(r.updatedAt.slice(0, 10)) : ''}.</span>` : ''}</div>
+        ${!editable && canWrite && someoneElse ? '<p class="note">Only the teammate who claimed this writer edits the record.</p>' : ''}
+      </section>
+      <section><h3>Draft the email</h3>
+        ${locked ? `<p class="warn">${w.dnc ? 'Do-not-contact list.' : 'Already ' + esc(status.toLowerCase()) + ' by ' + esc(nameOf(owner) || 'a teammate') + '.'} No new draft.</p>` : ''}
+        ${!state.sample ? '<p class="note">Drafting with Claude isn\'t available in this view.</p>' : ''}
+        ${state.sample && !pitchReady ? '<p class="note">The team pitch (what we offer) isn\'t set yet, so drafts will be generic. The artifact owner fills it in once.</p>' : ''}
+        <div class="grid2">
+          <label class="f">What to ask<select id="fAsk">${Object.keys(ASKS).map(k => `<option${k === (r.ask || 'Technical walkthrough') ? ' selected' : ''}>${esc(k)}</option>`).join('')}</select></label>
+          <label class="f">Sign as<input id="fSender" type="text" value="${esc(state.me?.name || '')}" placeholder="Your name"></label>
+        </div>
+        <div class="actions">
+          <button class="btn primary" type="button" data-act="draft" ${!state.sample || locked || state.drafting ? 'disabled' : ''}>${draft.body ? 'Redraft' : 'Draft email'}</button>
+          ${state.drafting ? '<button class="btn" type="button" data-act="stop">Stop</button><span class="note">Writing…</span>' : ''}
+        </div>
+        <label class="f">Subject<input id="draftSubject" type="text" value="${esc(draft.subject)}"></label>
+        <label class="f">Email<textarea id="draftBody">${esc(draft.body)}</textarea></label>
+        <div class="actions">
+          <button class="btn" type="button" data-act="copy">Copy email</button>
+          ${editable ? '<button class="btn" type="button" data-act="savedraft">Save draft for the team</button>' : ''}
+          ${r.draftBy ? `<span class="note">Saved draft by ${esc(nameOf(r.draftBy))}.</span>` : ''}
+        </div>
+        <p class="note">Drafts are a starting point: check the name, the details about their newsletter and every product claim before sending from your own email.</p>
+      </section>`;
+  }
+
+  function render() { renderStats(); renderTabs(); renderList(); renderDetail(); }
+
+  function readForm() {
+    return { status: $('fStatus').value, channel: $('fChannel').value, contactedOn: $('fDate').value,
+      contactUsed: $('fContact').value.trim(), notes: $('fNotes').value.trim() };
+  }
+
+  async function writeRecord(key, changes) {
+    const ref = state.db.collection('writers').doc(key);
+    const snap = await ref.get();
+    const body = { ...(snap.exists ? snap.data() : {}), ...changes, updatedBy: state.me.id, updatedAt: new Date().toISOString() };
+    await ref.set(body);
+  }
+
+  async function claim(w) {
+    const ref = state.db.collection('writers').doc(w.key);
+    // Lease first so two teammates pressing Claim at once can't both win.
+    const lease = await ref.acquire({ holder: state.me.id, ttlMs: 8000 });
+    if (!lease.acquired) return toast('A teammate is claiming this writer right now.');
+    const snap = await ref.get();
+    const cur = snap.exists ? snap.data() : {};
+    if (cur.owner && cur.owner !== state.me.id) return toast('Already claimed by ' + nameOf(cur.owner) + '.');
+    if (['Contacted', 'Replied', 'Do not contact'].includes(cur.status)) return toast('This writer was already ' + cur.status.toLowerCase() + '.');
+    await ref.set({ ...cur, owner: state.me.id, claimedAt: new Date().toISOString(), status: cur.status || 'Claimed',
+      updatedBy: state.me.id, updatedAt: new Date().toISOString() });
+    toast('Claimed. Your teammates see it now.');
+  }
+
+  async function draftEmail(w) {
+    const ask = $('fAsk').value, sender = $('fSender').value.trim() || 'the Nace AI team';
+    const p = state.pitch || {};
+    const first = firstName(w.author);
+    const prompt = `Write one short outreach email to a Substack writer. Return only JSON: {"subject": string, "body": string}.
+
+Rules:
+- Body: three short paragraphs, 60 to 90 words in total, then a blank line, then "Best," and the sender name on the next line.
+- Greeting: ${first ? `"Hi ${first},"` : '"Hello,"'} on its own line.
+- Paragraph 1: one specific, accurate observation about what this newsletter covers, based only on the description below. Don't invent articles, quotes, numbers or opinions.
+- Paragraph 2: one sentence introducing the sender and the product, using only the product facts below. Make no claim that is not in them.
+- Paragraph 3: this one question, exactly: "${ASKS[ask]}"${p.offer ? ` Then mention the offer: ${p.offer}` : ''}
+${p.link ? `- After the third paragraph, add the line: "Explore it: ${p.link}"` : ''}
+- Plain text, friendly, no hype words, no emoji, no placeholders in brackets.
+- Subject: under 60 characters, specific to this newsletter.
+
+Newsletter: ${w.name}
+Author: ${w.author || 'unknown'}
+URL: ${w.url}
+Description: ${w.desc || 'none given'}
+Topics: ${w.signals || 'not detected'}
+
+Sender: ${sender}, Nace AI
+Product: ${p.product || 'Drex, a decision model from Nace AI'}
+${p.useCase ? 'Use case: ' + p.useCase : ''}`;
+    state.drafting = new AbortController();
+    state.draft = { key: w.key, subject: '', body: '' };
+    renderDetail();
+    try {
+      const out = await state.sample.json(prompt, { signal: state.drafting.signal, cache: false });
+      state.draft = { key: w.key, subject: String(out.subject || ''), body: String(out.body || '') };
+    } catch (e) {
+      state.draft = null;
+      const copy = { not_granted: 'Drafting needs your OK to use Claude. Allow it when asked.', rate_limited: 'Too many drafts at once. Try again in a minute.',
+        refused: 'Claude declined this one. Write it by hand or change the ask.', invalid_json: 'The draft came back garbled. Press Draft email again.',
+        session_expired: 'Sign in to claude.ai again, then retry.' }[e.code];
+      if (e.code !== 'cancelled') toast(copy || 'Drafting failed. Try again.');
+      if (['not_granted', 'sampling_disabled', 'not_declared', 'capability_disabled', 'capability_removed'].includes(e.code)) state.sample = null;
+    } finally {
+      state.drafting = null;
+      renderDetail();
+    }
+  }
+
+  async function copyEmail() {
+    const text = `Subject: ${$('draftSubject').value}\n\n${$('draftBody').value}`;
+    try { await navigator.clipboard.writeText(text); toast('Copied. Paste it into your email.'); }
+    catch { $('draftBody').select(); toast('Press Ctrl+C (Cmd+C) to copy the selected email.'); }
+  }
+
+  async function act(name) {
+    const w = BY_KEY.get(state.sel);
+    if (name === 'back') { $('layout').classList.remove('open'); state.sel = null; render(); return; }
+    if (name === 'copy') return copyEmail();
+    if (name === 'stop') { state.drafting?.abort(); return; }
+    if (!w) return;
+    if (name === 'draft') return draftEmail(w);
+    if (state.busy) return;
+    state.busy = true;
+    try {
+      if (name === 'claim') await claim(w);
+      else if (name === 'release') { await writeRecord(w.key, { owner: null, status: rec(w.key).status === 'Claimed' ? '' : rec(w.key).status }); toast('Released. Someone else can take this writer.'); }
+      else if (name === 'save') {
+        const f = readForm();
+        if (['Contacted', 'Replied'].includes(f.status) && !f.contactedOn) f.contactedOn = today();
+        await writeRecord(w.key, { ...f, owner: rec(w.key).owner || state.me.id, claimedAt: rec(w.key).claimedAt || new Date().toISOString() });
+        toast('Saved for the team.');
+      } else if (name === 'contacted') {
+        const f = readForm();
+        await writeRecord(w.key, { ...f, status: 'Contacted', contactedOn: f.contactedOn || today(),
+          owner: rec(w.key).owner || state.me.id, claimedAt: rec(w.key).claimedAt || new Date().toISOString() });
+        toast('Marked contacted. Nobody else will pick this writer.');
+      } else if (name === 'savedraft') {
+        await writeRecord(w.key, { draftSubject: $('draftSubject').value, draftBody: $('draftBody').value, draftBy: state.me.id, ask: $('fAsk').value,
+          owner: rec(w.key).owner || state.me.id, claimedAt: rec(w.key).claimedAt || new Date().toISOString(), status: rec(w.key).status || 'Claimed' });
+        toast('Draft saved. Teammates can see it on this writer.');
+      }
+    } catch (e) {
+      if (e && e.code === 'invalid_argument') { state.canWrite = false; toast('You can view this page but not change the team record.'); }
+      else if (e && e.code === 'quota_exceeded') toast('The team record is full. Ask the owner to clear old entries.');
+      else toast('Could not save. Check your connection and try again.');
+    } finally { state.busy = false; render(); }
+  }
+
+  document.addEventListener('click', e => {
+    const tab = e.target.closest('[data-view]');
+    if (tab) { state.view = tab.dataset.view; state.page = 0; render(); return; }
+    const pg = e.target.closest('[data-page]');
+    if (pg) { state.page += Number(pg.dataset.page); renderList(); $('list').scrollIntoView({ block: 'start' }); return; }
+    const row = e.target.closest('.row');
+    if (row) { state.sel = row.dataset.key; state.draft = null; $('layout').classList.add('open'); render(); if (window.innerWidth <= 860) $('detail').scrollIntoView({ block: 'start' }); return; }
+    const a = e.target.closest('[data-act]');
+    if (a) act(a.dataset.act);
+  });
+  document.addEventListener('keydown', e => {
+    const row = e.target.closest && e.target.closest('.row');
+    if (row && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); row.click(); }
+  });
+  let searchTimer;
+  $('search').addEventListener('input', e => { clearTimeout(searchTimer); searchTimer = setTimeout(() => { state.q = e.target.value; state.page = 0; renderList(); renderTabs(); }, 150); });
+
+  render();
+
+  (async () => {
+    if (!window.claude || !window.claude.use) { showBanner('Open this page on claude.ai to claim writers and draft emails.'); return; }
+    const [db, user, sample] = await Promise.all([window.claude.use('db'), window.claude.use('user'), window.claude.use('sample')]);
+    state.user = user; state.sample = sample;
+    if (user) {
+      state.me = await user.me();
+      state.canWrite = await user.can('data.write');
+      if (state.me.id) $('me').innerHTML = `<img alt="" src="${esc(state.me.avatarUrl)}"><span>Signed in as <strong></strong></span>`, $('me').querySelector('strong').textContent = state.me.name || 'you';
+    }
+    if (!db) { showBanner('Team tracking needs you signed in to claude.ai with access to this page. You can still browse and draft.'); render(); return; }
+    state.db = db;
+    if (state.canWrite === false) showBanner('You can view the team record but not change it. Ask the page owner for Contributor access.');
+    db.collection('writers').limit(1000).onSnapshot(snap => {
+      state.team = new Map(snap.docs.map(d => [d.id, d.data()]));
+      state.teamReady = true;
+      render();
+      resolveNames();
+    }, () => showBanner('Lost the connection to the team record. Reload the page.'));
+    db.doc('settings/pitch').onSnapshot(s => { state.pitch = s.exists ? s.data() : null; renderDetail(); }, () => {});
+  })();
+
+  function showBanner(text) { const b = $('banner'); b.textContent = text; b.hidden = false; }
+})();
+</script>

@@ -1,7 +1,8 @@
-"""Vercel entry point: Google sign-in, session-bound CSRF tokens, then the same routes as the local worker.
+"""Hosted workspace on Vercel: Google sign-in, session-bound CSRF tokens, then the same routes as the local worker.
 
-Every request opens its own database connection and attributes events to the signed-in email.
-Nothing here sends email; the static page is served by Vercel from public/.
+handle() does the work for one request. Vercel loads the WSGI `app` from the root app.py; `handler`
+(a BaseHTTPRequestHandler) runs the same logic in-process for tests. Every request opens its own
+database connection and attributes events to the signed-in email. Nothing here sends email.
 """
 from __future__ import annotations
 
@@ -11,12 +12,23 @@ from urllib.parse import parse_qs, urlsplit
 
 from . import auth
 from .config import load_hosted_config
+from .page import render_page
 from .pipeline import Pipeline
-from .server import JSON, MAX_BODY, SECURITY_HEADERS, api_get, api_post, encode
+from .server import JSON, SECURITY_HEADERS, api_get, api_post, body_limit, encode
+
+HTML = "text/html; charset=utf-8"
+_page = None
+
+
+def page():
+    global _page
+    if _page is None:
+        _page = render_page()
+    return _page
 
 
 def request_path(raw_path):
-    """Route path and query. Vercel may hand us /api/index?path=... after the rewrite in vercel.json."""
+    """Route path and query. Older deployments rewrote /api/* to /api/index?path=...; accept both."""
     u = urlsplit(raw_path)
     query = {k: v[0] for k, v in parse_qs(u.query).items()}
     path = u.path
@@ -25,102 +37,141 @@ def request_path(raw_path):
     return path, query
 
 
+class Headers:
+    """Case-insensitive request headers, whichever server delivered them."""
+
+    def __init__(self, pairs):
+        self.values = {k.lower(): v for k, v in pairs}
+
+    def get(self, name, default=None):
+        return self.values.get(name.lower(), default)
+
+    def content_type(self):
+        return str(self.get("Content-Type") or "").split(";")[0].strip().lower()
+
+
+def response(value, status=200, content_type=JSON, cookies=(), location=None, headers=None):
+    pairs = [("Content-Type", content_type)] + list({**SECURITY_HEADERS, **(headers or {})}.items())
+    pairs += [("Set-Cookie", c) for c in cookies] + ([("Location", location)] if location else [])
+    return status, pairs, encode(value)
+
+
+def handle(environ, method, raw_path, headers, read_body):
+    """One request -> (status, header pairs, body bytes). read_body(limit) returns at most `limit` bytes."""
+    path, query = request_path(raw_path)
+    if method == "GET" and path in ("/", "/index.html"):
+        return response(page(), 200, HTML)
+    if not path.startswith("/api/"):
+        return response({"error": "Not found"}, 404)
+    try:
+        settings = auth.AuthSettings.from_env(environ)
+    except ValueError as exc:
+        return response({"error": "Server configuration: " + str(exc)}, 500)
+    cookie = headers.get("Cookie")
+    if method == "GET" and path == "/api/auth/login":
+        url, flow = auth.login_redirect(settings)
+        return response(b"", 302, "text/plain", [auth.set_cookie(auth.FLOW_COOKIE, flow, auth.FLOW_SECONDS)], url)
+    if method == "GET" and path == "/api/auth/callback":
+        return callback(settings, cookie, query)
+    if method == "GET" and path == "/api/auth/logout":
+        return response(b"", 302, "text/plain", [auth.set_cookie(auth.SESSION_COOKIE, "", 0)], "/")
+    user = auth.read_session(settings, cookie)
+    if not user:
+        return response({"error": "Sign in required", "login": "/api/auth/login"}, 401)
+    if method == "GET":
+        return with_pipeline(environ, user, lambda pipeline, config: get_route(settings, cookie, pipeline, config, path, query, user))
+    if method != "POST":
+        return response({"error": "Method not allowed"}, 405)
+    # Same-origin page, with the token bound to this session cookie.
+    if headers.get("Origin") != settings.app_origin or headers.get("Sec-Fetch-Site") == "cross-site" \
+            or headers.get("X-Local-Token") != auth.csrf_token(settings, cookie):
+        return response({"error": "Same-origin request with the session token required"}, 403)
+    try:
+        size = int(headers.get("Content-Length") or 0)
+    except ValueError:
+        size = 0
+    raw = read_body(size) if 0 < size <= body_limit(path) else b""
+    content_type = headers.content_type()
+    return with_pipeline(environ, user, lambda pipeline, config: post_route(pipeline, path, raw, content_type))
+
+
+def get_route(settings, cookie, pipeline, config, path, query, user):
+    status, body, content_type, *extra = api_get(pipeline, config, path, query)
+    if path == "/api/substack/bootstrap" and status == 200:
+        body.update(token=auth.csrf_token(settings, cookie), user={"email": user["email"]}, hosted=True)
+    return response(body, status, content_type, headers=extra[0] if extra else None)
+
+
+def post_route(pipeline, path, raw, content_type):
+    status, body, kind = api_post(pipeline, path, raw, content_type)
+    return response(body, status, kind)
+
+
+def callback(settings, cookie, query):
+    flow = auth.unsign(settings.session_secret, auth.cookies(cookie).get(auth.FLOW_COOKIE))
+    clear_flow = auth.set_cookie(auth.FLOW_COOKIE, "", 0)
+    try:
+        if query.get("error"):
+            raise ValueError("Google sign-in was cancelled")
+        if not flow or not query.get("state") or query["state"] != flow.get("state") or not query.get("code"):
+            raise ValueError("Sign-in could not be matched to this browser; start again")
+        user = auth.check_claims(settings, auth.exchange_code(settings, query["code"]), flow["nonce"])
+    except ValueError as exc:
+        return response(str(exc) + "\nOpen the workspace and sign in again.", 400, "text/plain; charset=utf-8", [clear_flow])
+    session = auth.set_cookie(auth.SESSION_COOKIE, auth.session_value(settings, user), auth.SESSION_SECONDS)
+    return response(b"", 302, "text/plain", [clear_flow, session], "/")
+
+
+def with_pipeline(environ, user, respond):
+    try:
+        config = load_hosted_config(environ)
+        pipeline = Pipeline(config, actor=user["email"])
+    except ValueError as exc:
+        return response({"error": "Server configuration: " + str(exc)}, 500)
+    try:
+        return respond(pipeline, config)
+    finally:
+        pipeline.store.close()
+
+
+REASONS = {200: "OK", 302: "Found", 400: "Bad Request", 401: "Unauthorized", 403: "Forbidden",
+           404: "Not Found", 405: "Method Not Allowed", 500: "Internal Server Error"}
+
+
+def app(environ, start_response):
+    """WSGI entry point that Vercel loads (see app.py)."""
+    pairs = [(k[5:].replace("_", "-"), v) for k, v in environ.items() if k.startswith("HTTP_")]
+    pairs += [(name, environ[key]) for key, name in (("CONTENT_TYPE", "Content-Type"), ("CONTENT_LENGTH", "Content-Length")) if environ.get(key)]
+    raw_path = environ.get("PATH_INFO") or "/"
+    if environ.get("QUERY_STRING"):
+        raw_path += "?" + environ["QUERY_STRING"]
+    status, headers, body = handle(os.environ, environ.get("REQUEST_METHOD", "GET"), raw_path, Headers(pairs),
+                                   lambda limit: environ["wsgi.input"].read(limit))
+    start_response(f"{status} {REASONS.get(status, 'OK')}", headers + [("Content-Length", str(len(body)))])
+    return [body]
+
+
 class handler(BaseHTTPRequestHandler):
+    """The same logic behind Python's built-in HTTP server (used by the tests)."""
     environ = os.environ
 
     def log_message(self, fmt, *args):
         # URLs and bodies can contain contact data. Avoid request logs.
         pass
 
-    def reply(self, value, status=200, content_type=JSON, cookies=(), location=None):
-        body = encode(value)
+    def run(self, method):
+        status, headers, body = handle(self.environ, method, self.path, Headers(self.headers.items()), self.rfile.read)
         self.send_response(status)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(body)))
-        for name, header in SECURITY_HEADERS.items():
-            self.send_header(name, header)
-        for cookie in cookies:
-            self.send_header("Set-Cookie", cookie)
-        if location:
-            self.send_header("Location", location)
+        for name, value in headers + [("Content-Length", str(len(body)))]:
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(body)
 
-    def settings(self):
-        return auth.AuthSettings.from_env(self.environ)
-
     def do_GET(self):
-        try:
-            settings = self.settings()
-        except ValueError as exc:
-            return self.reply({"error": "Server configuration: " + str(exc)}, 500)
-        path, query = request_path(self.path)
-        if path == "/api/auth/login":
-            url, flow = auth.login_redirect(settings)
-            return self.reply(b"", 302, "text/plain", [auth.set_cookie(auth.FLOW_COOKIE, flow, auth.FLOW_SECONDS)], url)
-        if path == "/api/auth/callback":
-            return self.callback(settings, query)
-        if path == "/api/auth/logout":
-            return self.reply(b"", 302, "text/plain", [auth.set_cookie(auth.SESSION_COOKIE, "", 0)], "/")
-        user = auth.read_session(settings, self.headers.get("Cookie"))
-        if not user:
-            return self.reply({"error": "Sign in required", "login": "/api/auth/login"}, 401)
-        return self.with_pipeline(user, lambda pipeline, config: self.get_route(settings, pipeline, config, path, query, user))
-
-    def get_route(self, settings, pipeline, config, path, query, user):
-        status, body, content_type = api_get(pipeline, config, path, query)
-        if path == "/api/substack/bootstrap" and status == 200:
-            body.update(token=auth.csrf_token(settings, self.headers.get("Cookie")), user={"email": user["email"]}, hosted=True)
-        return self.reply(body, status, content_type)
-
-    def callback(self, settings, query):
-        flow = auth.unsign(settings.session_secret, auth.cookies(self.headers.get("Cookie")).get(auth.FLOW_COOKIE))
-        clear_flow = auth.set_cookie(auth.FLOW_COOKIE, "", 0)
-        try:
-            if query.get("error"):
-                raise ValueError("Google sign-in was cancelled")
-            if not flow or not query.get("state") or query["state"] != flow.get("state") or not query.get("code"):
-                raise ValueError("Sign-in could not be matched to this browser; start again")
-            user = auth.check_claims(settings, auth.exchange_code(settings, query["code"]), flow["nonce"])
-        except ValueError as exc:
-            return self.reply(str(exc) + "\nOpen the workspace and sign in again.", 400, "text/plain; charset=utf-8", [clear_flow])
-        session = auth.set_cookie(auth.SESSION_COOKIE, auth.session_value(settings, user), auth.SESSION_SECONDS)
-        return self.reply(b"", 302, "text/plain", [clear_flow, session], "/")
+        self.run("GET")
 
     def do_POST(self):
-        try:
-            settings = self.settings()
-        except ValueError as exc:
-            return self.reply({"error": "Server configuration: " + str(exc)}, 500)
-        user = auth.read_session(settings, self.headers.get("Cookie"))
-        if not user:
-            return self.reply({"error": "Sign in required", "login": "/api/auth/login"}, 401)
-        # Same-origin page, with the token bound to this session cookie.
-        if self.headers.get("Origin") != settings.app_origin or self.headers.get("Sec-Fetch-Site") == "cross-site" \
-                or self.headers.get("X-Local-Token") != auth.csrf_token(settings, self.headers.get("Cookie")):
-            return self.reply({"error": "Same-origin request with the session token required"}, 403)
-        try:
-            size = int(self.headers.get("Content-Length", "0"))
-        except ValueError:
-            size = 0
-        raw = self.rfile.read(size) if 0 < size <= MAX_BODY else b""
-        path, _ = request_path(self.path)
-        return self.with_pipeline(user, lambda pipeline, config: self.post_route(pipeline, path, raw))
-
-    def post_route(self, pipeline, path, raw):
-        status, body, content_type = api_post(pipeline, path, raw, self.headers.get_content_type())
-        return self.reply(body, status, content_type)
-
-    def with_pipeline(self, user, respond):
-        try:
-            config = load_hosted_config(self.environ)
-            pipeline = Pipeline(config, actor=user["email"])
-        except ValueError as exc:
-            return self.reply({"error": "Server configuration: " + str(exc)}, 500)
-        try:
-            return respond(pipeline, config)
-        finally:
-            pipeline.store.close()
+        self.run("POST")
 
 
-__all__ = ["handler", "request_path"]
+__all__ = ["app", "handler", "handle", "request_path"]

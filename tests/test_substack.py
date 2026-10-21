@@ -277,6 +277,83 @@ class PipelineTests(unittest.TestCase):
         for flag in ('UNSUPPORTED_PROMISE_OR_PLACEHOLDER', 'PRODUCT_USE_CASE_SUPPORT_OR_LINK_MISSING'):
             self.assertIn(flag, d['validation']['blocking_flags'])
 
+    def test_contacted_checkbox_is_shared_and_blocks_other_teammates(self):
+        fx = json.loads((FIXTURES / 'contacted_marks.json').read_text(encoding='utf-8'))
+        a, b = self.pub('Main publication'), self.pub('Same author, second publication')
+        self.research(b); self.p.generate(b)
+        self.p.store.close()
+        alice = self.p = Pipeline(self.config, actor='alice@example.com')
+        for case in fx['invalid']:
+            with self.assertRaisesRegex(ValueError, case['error']):
+                alice.action(a, 'contacted', case['data'])
+        alice.action(a, 'contacted', fx['mark'])
+        alice.action(a, 'contacted', fx['mark'])  # same mark again on the same day is not a second contact
+        rows = alice.store.db.execute('SELECT channel,event,source,actor FROM contacts').fetchall()
+        self.assertEqual([tuple(r) for r in rows], [('LinkedIn', 'Contacted', 'https://www.linkedin.com/in/sam-example/', 'alice@example.com')])
+        listed = {i['id']: i['contacted'] for i in alice.queue()['items']}
+        self.assertEqual(listed[a]['actor'], 'alice@example.com')
+        self.assertEqual((listed[b]['channel'], listed[b]['event']), ('LinkedIn', 'Contacted'))
+        alice.store.close()
+        bob = self.p = Pipeline(self.config, actor='bob@example.com')
+        with self.assertRaisesRegex(ValueError, 'prior contact'):
+            bob.generate(b, regenerate=True)
+        self.assertIn('PREVIOUS_CONTACT_REVIEW_REQUIRED', bob.detail(b)['draft']['validation']['blocking_flags'])
+        third = self.pub('Different author', 'author:77')
+        # Same email means same person, so the unrelated writer needs its own route.
+        pub = bob.store.get(third); pub['contact_route'] = 'editor@different.example'; bob.store.save(pub); bob.store.db.commit()
+        self.assertEqual(bob.store.get(third)['previous_contact'], [])
+        bob.action(third, 'contacted', {'confirmed': True, 'channel': 'Email'})
+        self.assertEqual(bob.store.get(third)['previous_contact'][0]['source'], 'Marked contacted in the workspace by bob@example.com')
+
+    def upload_sheet(self, sheet, last=True, extra_rows=()):
+        table = json.loads((FIXTURES / 'all_channels_sample.json').read_text(encoding='utf-8'))['sheets'][sheet]
+        return self.p.upload_rows({'sheet': sheet, 'headers': table['headers'], 'rows': table['rows'] + list(extra_rows), 'offset': 0, 'last': last})
+
+    def test_json_upload_imports_substack_sheet_and_rejects_other_channels(self):
+        result = self.upload_sheet('substack')
+        self.assertEqual((result['inserted'], result['duplicates'], result['sheet']), (3, 0, 'substack'))
+        self.assertEqual(result['shortlisted'], 2)  # the garden diary has no topical signal
+        pub = self.p.store.get(1)
+        self.assertEqual((pub['publication'], pub['source']['free_subscribers'], pub['author_publications']), ('Agent Notes', '12000', 2))
+        self.assertTrue(self.p.store.db.execute("SELECT path FROM imports").fetchone()[0].startswith('upload:substack by '))
+        for other in ('Discord', 'mediun', 'Copy of hackernoon'):
+            with self.assertRaisesRegex(ValueError, 'not a Substack publication table'):
+                self.upload_sheet(other)
+        with self.assertRaisesRegex(ValueError, 'at most 5000'):
+            self.p.upload_rows({'sheet': 'substack', 'headers': ['url'], 'rows': [{}] * 5001})
+
+    def test_reupload_keeps_who_was_contacted(self):
+        self.upload_sheet('substack')
+        self.p.action(1, 'contacted', {'confirmed': True, 'channel': 'X', 'link': 'https://x.com/sam'})
+        self.p.action(3, 'skip', {'reason': 'Off topic'})
+        again = self.upload_sheet('substack')
+        self.assertTrue(again['resumed'])
+        newer = {'_row': 5, 'name': 'Agent Notes Podcast', 'author_name': 'Sam Example', 'url': 'https://agentnotespod.substack.com/',
+                 'categories': 'Technology', 'hero_text': 'Interviews about AI agents and LLM evaluation', 'pub_id': '1004', 'author_id': '501'}
+        result = self.upload_sheet('substack', extra_rows=[newer])
+        self.assertEqual((result['inserted'], result['duplicates']), (1, 3))
+        listed = {i['publication']: i for i in self.p.queue(scope='all')['items']}
+        for name in ('Agent Notes', 'Agent Notes Weekly', 'Agent Notes Podcast'):
+            self.assertEqual(listed[name]['contacted']['channel'], 'X', name)  # same author, including the new publication
+        self.assertEqual(listed['Garden Diary']['status'], 'Skipped')
+        self.assertEqual(self.p.store.db.execute('SELECT count(*) FROM contacts').fetchone()[0], 1)
+
+    def test_export_is_a_named_download_with_counts_and_excel_friendly_csv(self):
+        from substack_outreach.server import api_get
+        pid, _ = self.ready()
+        self.p.action(pid, 'contacted', {'confirmed': True, 'channel': 'Email'})
+        other = self.pub('No draft yet', 'author:9')
+        pub = self.p.store.get(other); pub['contact_route'] = 'editor@nodraft.example'; self.p.store.save(pub); self.p.store.db.commit()
+        status, body, content_type, headers = api_get(self.p, self.config, '/api/substack/export', {'format': 'csv', 'scope': 'pilot'})
+        self.assertEqual((status, content_type), (200, 'text/csv; charset=utf-8'))
+        self.assertRegex(headers['Content-Disposition'], r'^attachment; filename="substack-pilot-\d{4}-\d{2}-\d{2}\.csv"$')
+        self.assertEqual((headers['X-Export-Rows'], headers['X-Export-Drafts']), ('2', '1'))
+        self.assertTrue(body.startswith(chr(0xfeff) + 'publication,'))
+        self.assertIn('Contacted · Email', body)
+        rows = json.loads(api_get(self.p, self.config, '/api/substack/export', {'format': 'json', 'scope': 'all'})[1])
+        self.assertEqual(sorted(r['contacted'][:9] for r in rows), ['', 'Contacted'])
+        self.assertEqual(api_get(self.p, self.config, '/api/substack/export', {'format': 'csv', 'scope': 'everyone'})[0], 400)
+
     def test_pending_claims_and_mock_cannot_approve(self):
         pid = self.pub(); self.research(pid)
         p = self.p.generate(pid)
@@ -960,6 +1037,28 @@ class PipelineTests(unittest.TestCase):
             load_hosted_config({'SUBSTACK_CONFIG': dumps({'provider': 'local', 'model': 'm'})})
 
 
+class TeamPageTests(unittest.TestCase):
+    def test_team_page_bakes_substack_rows_ranked_and_escaped(self):
+        sys_path = str(ROOT / 'team_page')
+        import sys
+        sys.path.insert(0, sys_path)
+        try:
+            import build_team_page as tp
+        finally:
+            sys.path.remove(sys_path)
+        sample = json.loads((FIXTURES / 'all_channels_sample.json').read_text(encoding='utf-8'))
+        table = sample['sheets']['substack']
+        table['rows'].append(dict(table['rows'][0], _row=9, pub_id='1009', author_id='599', name='Close </script> tag',
+                                  url='https://closetag.substack.com', hero_text='LLM inference notes'))
+        rows = tp.writers(table, load_dnc(FIXTURES / 'dnc.json'))
+        self.assertEqual([w['name'] for w in rows][:2], ['Agent Notes', 'Close </script> tag'])
+        self.assertEqual([w['short'] for w in rows], [1, 1, 1, 0])  # the garden diary has no topical signal
+        page = tp.render(rows)
+        self.assertNotIn('__WRITERS__', page)
+        data = page.split('<script type="application/json" id="writers-data">')[1].split('</script>')[0]
+        self.assertEqual(len(json.loads(data)), 4)
+        self.assertNotIn('discord.gg', page)
+
 class WorkbookErrorTests(unittest.TestCase):
     """Structurally broken .xlsx files must fail as one ValueError, never a raw traceback."""
     NS = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'
@@ -1192,13 +1291,52 @@ class HostedTests(unittest.TestCase):
         self.assertEqual(status, 500)
         self.assertIn('GOOGLE_CLIENT_SECRET', json.loads(body)['error'])
 
-    def test_vercel_files_keep_private_inputs_out(self):
+    def test_vercel_entry_point_and_private_inputs(self):
         ignore = (ROOT / '.vercelignore').read_text(encoding='utf-8')
         for private in ('.local/', '*.xlsx', 'substack.config.json', 'substack_outreach/facts.json', 'substack_outreach/dnc.json', '*.sqlite3'):
             self.assertIn(private, ignore.splitlines())
-        vercel = json.loads((ROOT / 'vercel.json').read_text(encoding='utf-8'))
-        self.assertEqual(vercel['rewrites'], [{'source': '/api/(.*)', 'destination': '/api/index?path=$1'}])
-        self.assertEqual((ROOT / 'requirements.txt').read_text(encoding='utf-8').split('\n')[-2], 'pg8000==1.31.2')
+        import tomllib
+        project = tomllib.loads((ROOT / 'pyproject.toml').read_text(encoding='utf-8'))
+        self.assertEqual(project['tool']['vercel']['entrypoint'], 'app:app')
+        self.assertEqual(project['project']['dependencies'], ['pg8000==1.31.2'])
+        # New Vercel projects ignore api/*.py functions; a stale vercel.json "functions" entry fails the build.
+        self.assertFalse((ROOT / 'api').exists())
+        self.assertFalse((ROOT / 'vercel.json').exists())
+        import app
+        self.assertIs(app.app, __import__('substack_outreach.hosted', fromlist=['app']).app)
+
+    def wsgi(self, method, path, headers=None, body=b''):
+        from substack_outreach.hosted import app
+        query = path.split('?', 1)[1] if '?' in path else ''
+        environ = {'REQUEST_METHOD': method, 'PATH_INFO': path.split('?')[0], 'QUERY_STRING': query, 'wsgi.input': io.BytesIO(body)}
+        for name, value in (headers or {}).items():
+            key = name.upper().replace('-', '_')
+            environ[key if key in ('CONTENT_TYPE', 'CONTENT_LENGTH') else 'HTTP_' + key] = value
+        if body:
+            environ['CONTENT_LENGTH'] = str(len(body))
+        seen = {}
+        with patch.dict('os.environ', self.env):
+            payload = b''.join(app(environ, lambda status, pairs: seen.update(status=status, headers=pairs)))
+        return int(seen['status'].split()[0]), seen['headers'], payload
+
+    def test_wsgi_app_serves_page_signin_and_mutations_like_vercel(self):
+        status, headers, body = self.wsgi('GET', '/')
+        self.assertEqual((status, dict(headers)['Content-Type']), (200, 'text/html; charset=utf-8'))
+        self.assertIn(b'id="tab-substack"', body)
+        self.assertEqual(self.wsgi('GET', '/api/substack/bootstrap')[0], 401)
+        self.assertEqual(self.wsgi('GET', '/nothing-here')[0], 404)
+        cookie = self.signed_in()
+        status, _, body = self.wsgi('GET', '/api/substack/bootstrap', {'Cookie': cookie})
+        self.assertEqual((status, json.loads(body)['user']['email']), (200, 'reviewer@example.com'))
+        status, headers, _ = self.wsgi('GET', '/api/substack/export?format=csv&scope=pilot', {'Cookie': cookie})
+        self.assertTrue(dict(headers)['Content-Disposition'].startswith('attachment; filename="substack-pilot-'))
+        payload = dumps({'reason': 'Not a fit'}).encode()
+        base = {'Cookie': cookie, 'Content-Type': 'application/json; charset=utf-8', 'Origin': 'https://outreach.example.test',
+                'X-Local-Token': self.auth.csrf_token(self.settings, cookie)}
+        status, _, body = self.wsgi('POST', f'/api/substack/publication/{self.pid}/skip', base, payload)
+        self.assertEqual((status, json.loads(body)['status']), (200, 'Skipped'))
+        self.assertEqual(self.wsgi('POST', f'/api/substack/publication/{self.pid}/skip', base | {'Origin': 'https://evil.example'}, payload)[0], 403)
+
 
 
 if __name__ == '__main__':

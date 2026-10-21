@@ -16,6 +16,10 @@ from .store import Store, load_dnc
 from .workbook import find_workbook
 
 
+CONTACT_CHANNELS = ["Email", "X", "LinkedIn", "Substack DM", "Other"]
+UPLOAD_MAX_ROWS = 5000
+
+
 class Pipeline:
     def __init__(self, config, actor=None):
         self.config = config
@@ -56,7 +60,10 @@ class Pipeline:
         items = []
         for r in rows:
             p = self.store.get(r[0])
-            items.append({k: p.get(k) for k in ("id", "publication", "author_name", "status", "fit_category", "fit_reasons", "owner", "score", "publication_url", "profile_url", "author_publications", "do_not_contact", "source_kind")})
+            item = {k: p.get(k) for k in ("id", "publication", "author_name", "status", "fit_category", "fit_reasons", "owner", "score", "publication_url", "profile_url", "author_publications", "do_not_contact", "source_kind")}
+            # Latest contact with this writer on any channel, shared across their publications.
+            item["contacted"] = {k: p["previous_contact"][0].get(k) for k in ("channel", "event", "at", "actor")} if p["previous_contact"] else None
+            items.append(item)
         return {"items": items, "total": total, "offset": offset}
 
     def dnc_list(self):
@@ -67,6 +74,27 @@ class Pipeline:
 
     def import_workbook(self, input_path=None, batch=None, shortlist=None):
         result = self.store.import_workbook(find_workbook(input_path or self.config.get("input_path")))
+        return self.after_import(result, batch, shortlist)
+
+    def upload_rows(self, data):
+        """One batch of an uploaded table (the browser splits big files). The last batch applies DNC and the shortlist."""
+        sheet, headers, rows = data.get("sheet"), data.get("headers"), data.get("rows")
+        if not isinstance(sheet, str) or not isinstance(headers, list) or not all(isinstance(h, str) and h for h in headers):
+            raise ValueError("Upload needs a sheet name and a list of column headers")
+        if len(set(headers)) != len(headers) or not {"url", "pub_id"} & set(headers):
+            raise ValueError(f"Sheet {sheet!r} is not a Substack publication table (needs url or pub_id columns)")
+        if not isinstance(rows, list) or len(rows) > UPLOAD_MAX_ROWS or not all(isinstance(r, dict) for r in rows):
+            raise ValueError(f"Upload rows as a list of objects, at most {UPLOAD_MAX_ROWS} per request")
+        offset = int(data.get("offset") or 0)
+        cell = lambda v: None if v is None or v == "" else (v if isinstance(v, str) else str(v))
+        table = [(int(r["_row"]) if str(r.get("_row", "")).isdigit() else offset + n + 2, {h: cell(r.get(h)) for h in headers})
+                 for n, r in enumerate(rows)]
+        label = f"upload:{sheet} by {self.store.actor or 'local operator'}"
+        result = self.store.import_rows(headers, table, digest(["upload", sheet, headers, table]), label)
+        result["sheet"] = sheet
+        return self.after_import(result) if data.get("last") is True else result
+
+    def after_import(self, result, batch=None, shortlist=None):
         entries, name = self.dnc_list()
         result["dnc_list"] = name
         result["dnc_suppressed"] = self.store.apply_dnc(entries, name)
@@ -405,6 +433,21 @@ class Pipeline:
                     raise ValueError("Record a sent message before a reply")
                 self.store.record_contact(pub, "email", "Replied", data.get("source") or "Manual record in local review UI", data.get("note", ""))
                 pub["status"] = "Replied"
+            elif action == "contacted":
+                # The quick "Contacted" checkbox: any channel, who and when, so teammates never ping a writer twice.
+                if data.get("confirmed") is not True:
+                    raise ValueError("Tick Contacted to confirm this writer was reached")
+                if data.get("channel") not in CONTACT_CHANNELS:
+                    raise ValueError("Channel must be one of: " + ", ".join(CONTACT_CHANNELS))
+                link = str(data.get("link") or "").strip()
+                if link and not safe_url(link).startswith("https://"):
+                    raise ValueError("Link must be an https URL to the message or profile")
+                source = link or "Marked contacted in the workspace by " + (self.store.actor or "the local operator")
+                self.store.record_contact(pub, data["channel"], "Contacted", source, str(data.get("note") or ""),
+                                          dedup=digest([pub["author_key"], data["channel"], source, now()[:10]]))
+                self.store.invalidate(pid, "Writer marked contacted")
+                if pub["status"] in ("Approved", "Reviewed"):
+                    pub["status"] = "Drafted"
             elif action == "history":
                 if data.get("identity_alias"):
                     self.store.link_identity(pub, data["identity_alias"])
@@ -434,6 +477,9 @@ class Pipeline:
     def export(self, fmt="json", scope="pilot"):
         if fmt == "sendsheet":
             return self.sendsheet(scope)
+        return render_export(self.export_rows(scope), fmt)
+
+    def export_rows(self, scope="pilot"):
         rows = []
         clause = " WHERE pilot=1" if scope == "pilot" else " WHERE shortlisted=1" if scope == "shortlisted" else ""
         for r in self.store.db.execute("SELECT id FROM publications" + clause + " ORDER BY score DESC,id").fetchall():
@@ -441,20 +487,37 @@ class Pipeline:
             draft, e = p.get("draft") or {}, p.get("evidence") or {}
             rows.append({"publication": p["publication"], "author": p["author_name"], "publication_url": p["publication_url"],
                          "article_url": e.get("article_url", ""), "supporting_excerpt": e.get("supporting_excerpt", ""),
-                         "angle": e.get("drex_connection", ""), "contact": p["contact_route"], "contact_source": p["contact_source_url"],
+                         "angle": e.get("drex_connection", ""), "contact": p.get("contact_route", ""), "contact_source": p.get("contact_source_url", ""),
                          "subject": draft.get("subject", ""), "email_body": draft.get("plain_text_body", ""),
-                         "owner": p["owner"], "status": p["status"], "review_flags": draft.get("review_flags", e.get("review_flags", ["NEEDS_RESEARCH"]))})
-        if fmt == "json":
-            return json.dumps(rows, ensure_ascii=False, indent=2)
-        if fmt != "csv":
-            raise ValueError("Export format must be csv, json or sendsheet")
-        fields = ["publication", "author", "publication_url", "article_url", "supporting_excerpt", "angle", "contact", "contact_source", "subject", "email_body", "owner", "status", "review_flags"]
-        output = io.StringIO(newline="")
-        writer = csv.DictWriter(output, fieldnames=fields)
-        writer.writeheader()
-        for row in rows:
-            writer.writerow({k: csv_safe(dumps(v) if isinstance(v, list) else v) for k, v in row.items()})
-        return output.getvalue()
+                         "owner": p.get("owner", ""), "status": p["status"], "review_flags": draft.get("review_flags", e.get("review_flags", ["NEEDS_RESEARCH"])),
+                         "contacted": contacted_label(p["previous_contact"])})
+        return rows
+
+
+def contacted_label(history):
+    """Latest contact with this writer, e.g. "Contacted · LinkedIn · alice@nace.ai · 2026-10-20"."""
+    if not history:
+        return ""
+    c = history[0]
+    return " · ".join(str(v) for v in (c.get("event"), c.get("channel"), c.get("actor") or "", str(c.get("at") or "")[:10]) if v)
+
+
+EXPORT_FIELDS = ["publication", "author", "publication_url", "article_url", "supporting_excerpt", "angle", "contact", "contact_source",
+                 "subject", "email_body", "owner", "status", "contacted", "review_flags"]
+
+
+def render_export(rows, fmt):
+    if fmt == "json":
+        return json.dumps(rows, ensure_ascii=False, indent=2)
+    if fmt != "csv":
+        raise ValueError("Export format must be csv, json or sendsheet")
+    output = io.StringIO(newline="")
+    writer = csv.DictWriter(output, fieldnames=EXPORT_FIELDS)
+    writer.writeheader()
+    for row in rows:
+        writer.writerow({k: csv_safe(dumps(v) if isinstance(v, list) else v) for k, v in row.items()})
+    # The byte-order mark makes Excel on Windows read the file as UTF-8 (names, emoji, non-Latin scripts).
+    return "﻿" + output.getvalue()
 
 
 def mailto_link(to, subject, body):

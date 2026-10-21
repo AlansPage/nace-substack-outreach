@@ -1,0 +1,9 @@
+{
+  "mark": {"confirmed": true, "channel": "LinkedIn", "link": "https://www.linkedin.com/in/sam-example/"},
+  "invalid": [
+    {"data": {"confirmed": true, "channel": "Carrier pigeon"}, "error": "Channel must be one of"},
+    {"data": {"confirmed": true, "channel": "X", "link": "http://x.com/sam"}, "error": "https URL"},
+    {"data": {"confirmed": true, "channel": "X", "link": "javascript:alert(1)"}, "error": "https URL"},
+    {"data": {"confirmed": false, "channel": "Email"}, "error": "Tick Contacted"}
+  ]
+}
