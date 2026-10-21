@@ -266,7 +266,7 @@ The same workspace can run on Vercel so teammates share one database. Hosted mod
 
 ### 1. Create the project and database
 
-1. On vercel.com: **Add New → Project**, import `AlansPage/nace-substack-outreach`, Framework Preset **Other**, no build command. `pyproject.toml` names the entry point (`[tool.vercel] entrypoint = "app:app"`): every request, including the page at `/`, goes to the WSGI `app` in `app.py`, which renders the page itself. There is no `api/` folder and no `vercel.json`: new Vercel projects no longer turn `api/*.py` files into functions, and a leftover `functions` entry fails the build with `unused_function`.
+1. On vercel.com: **Add New → Project**, import `AlansPage/nace-substack-outreach`, `vercel.json` sets the Framework Preset to `python` (it overrides the dashboard, so a project created as a static site still runs the app). `pyproject.toml` names the entry point (`[tool.vercel] entrypoint = "app:app"`): every request, including the page at `/`, goes to the WSGI `app` in `app.py`, which renders the page itself. There is no `api/` folder and no `functions` entry: new Vercel projects no longer turn `api/*.py` files into functions, and a leftover `functions` entry fails the build with `unused_function`.
 2. In the project: **Storage → Marketplace → Neon → Connect**. Vercel adds `DATABASE_URL` to the project's environment variables. The tables are created on first use.
 
 ### 2. Create the Google sign-in client

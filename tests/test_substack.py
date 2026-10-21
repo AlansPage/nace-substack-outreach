@@ -1301,7 +1301,9 @@ class HostedTests(unittest.TestCase):
         self.assertEqual(project['project']['dependencies'], ['pg8000==1.31.2'])
         # New Vercel projects ignore api/*.py functions; a stale vercel.json "functions" entry fails the build.
         self.assertFalse((ROOT / 'api').exists())
-        self.assertFalse((ROOT / 'vercel.json').exists())
+        # The Python preset makes Vercel run app.py even when the dashboard says "static site".
+        self.assertEqual(json.loads((ROOT / 'vercel.json').read_text(encoding='utf-8'))['framework'], 'python')
+        self.assertNotIn('functions', json.loads((ROOT / 'vercel.json').read_text(encoding='utf-8')))
         import app
         self.assertIs(app.app, __import__('substack_outreach.hosted', fromlist=['app']).app)
 
