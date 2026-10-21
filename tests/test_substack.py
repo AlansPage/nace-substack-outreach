@@ -1011,8 +1011,9 @@ class PipelineTests(unittest.TestCase):
 
     def test_registry_from_database_and_actor_attribution(self):
         self.config['registry_path'] = 'database'
-        with self.assertRaisesRegex(ValueError, 'run facts-push'):
-            self.p.facts()
+        # Before any facts-push the shared workspace still opens, on the all-pending placeholder registry.
+        placeholder, _ = self.p.facts()
+        self.assertTrue(placeholder['entries'] and all(e['approval_status'] == 'pending' for e in placeholder['entries']))
         first = push_registry(self.p.store, self.facts, 'Pusher')
         self.assertEqual((first['entries'], first['approved']), (len(self.facts['entries']), 0))
         self.assertEqual(self.p.facts()[0]['version'], self.facts['version'])
