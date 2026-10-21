@@ -999,6 +999,32 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual((calls['commits'], calls['rollbacks']), (1, 1))
         self.assertEqual(calls['sql'][0], ('INSERT INTO runs(kind,started_at) VALUES(?,?) RETURNING id', ('x', 'now')))
 
+    def test_postgres_schema_is_only_changed_when_missing(self):
+        from substack_outreach import db as dbmod
+        class FakePg:
+            def __init__(self, url, ready):
+                self.sql, self.ready = [], ready
+            def execute(self, sql, params=()):
+                self.sql.append(sql)
+                if 'information_schema.tables' in sql:
+                    return dbmod.Cursor([(t,) for t in dbmod.SCHEMA_TABLES] if self.ready else [])
+                if 'pg_indexes' in sql:
+                    return dbmod.Cursor([(i,) for i in dbmod.SCHEMA_INDEXES] if self.ready else [])
+                if 'information_schema.columns' in sql:
+                    return dbmod.Cursor(list(dbmod.ADDED_COLUMNS) if self.ready else [])
+                return dbmod.Cursor([])
+            def executescript(self, script):
+                self.sql.append('SCRIPT')
+            def commit(self):
+                pass
+        for ready, expect_ddl in ((True, False), (False, True)):
+            with patch.object(dbmod, 'PgConnection', lambda url, r=ready: FakePg(url, r)):
+                conn = dbmod.connect('postgresql://u:p@db.example/x')
+            ddl = [s for s in conn.sql if s == 'SCRIPT' or s.startswith('ALTER')]
+            self.assertEqual(bool(ddl), expect_ddl)
+        self.assertEqual(dbmod.SCHEMA_TABLES >= {'publications', 'events', 'facts_registry', 'contacts'}, True)
+        self.assertEqual(dbmod.SCHEMA_INDEXES, {'pub_queue', 'pub_author'})
+
     def test_postgres_rows_behave_like_sqlite_rows(self):
         from substack_outreach.db import Cursor, Row, is_postgres, resolve
         row = Row((7, 'Approved'), ['id', 'status'])

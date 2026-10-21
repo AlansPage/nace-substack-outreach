@@ -262,7 +262,9 @@ Metrics report imported/shortlisted publications, research completion and failed
 
 The same workspace can run on Vercel so teammates share one database. Hosted mode uses Postgres (Neon from the Vercel Marketplace) through the pure-Python `pg8000` driver, the only dependency in `pyproject.toml` (and `requirements.txt`); the local worker still needs no packages. Nothing sends email in either mode.
 
-**Who can see what.** Sign-in is open to any Google account unless you restrict it. Everyone who signs in can read the facts registry (including unreleased numbers and launch timing), every contact route and draft, and can approve drafts and record sends. Every action is recorded with the signed-in email in `events.actor`. Set `ALLOWED_EMAIL_DOMAIN=nace.ai` (checked against Google's `hd` claim) or `ALLOWED_EMAILS=a@nace.ai,b@nace.ai` to restrict sign-in; no code change is needed.
+**Signing in.** Set `TEAM_PASSWORD` (12+ characters) and the sign-in page asks for a name and that shared password; the name is what teammates see on claims and records, and it is not verified. Without `TEAM_PASSWORD`, sign-in uses Google (steps 2 and 3 below). Change the team password in Vercel and redeploy to lock everyone out; changing `SESSION_SECRET` also signs everyone out.
+
+**Who can see what.** With Google sign-in, any Google account can sign in unless you restrict it. Everyone who signs in can read the facts registry (including unreleased numbers and launch timing), every contact route and draft, and can approve drafts and record sends. Every action is recorded with the signed-in email in `events.actor`. Set `ALLOWED_EMAIL_DOMAIN=nace.ai` (checked against Google's `hd` claim) or `ALLOWED_EMAILS=a@nace.ai,b@nace.ai` to restrict sign-in; no code change is needed.
 
 ### 1. Create the project and database
 
@@ -282,7 +284,8 @@ In Vercel → **Settings → Environment Variables** (Production and Preview):
 
 | Variable | Value |
 |---|---|
-| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | From step 2 |
+| `TEAM_PASSWORD` | Shared team password, 12+ characters (or leave unset and use Google sign-in) |
+| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | From step 2, only for Google sign-in |
 | `SESSION_SECRET` | 32+ random characters, generated below; changing it signs everyone out |
 | `APP_ORIGIN` | `https://YOUR-APP.vercel.app` (no trailing slash); POST requests from any other origin are refused |
 | `SUBSTACK_CONFIG` | One-line JSON with your settings, e.g. `{"sender": {"name": "Your Name", "company": "Nace AI", "email": "you@nace.ai"}, "batch_size": 20, "network_enabled": true, "collect_contacts": true}` |
@@ -319,7 +322,7 @@ Remove-Item Env:\DATABASE_URL
 
 ### 5. Use it
 
-Open `https://YOUR-APP.vercel.app/` and press **Sign in with Google**. The header shows who is signed in; reviewer fields are pre-filled with your email but still need the review checkbox. **Propose contacts from about pages** runs inside the 300-second limit, so keep its batch at 20 or below.
+Open `https://YOUR-APP.vercel.app/` and press **Sign in** (name and team password, or Google). The header shows who is signed in; reviewer fields are pre-filled with your email but still need the review checkbox. **Propose contacts from about pages** runs inside the 300-second limit, so keep its batch at 20 or below.
 
 Limits: request and response bodies are capped at 4.5 MB by Vercel; the send sheet is built with the CLI, not served by the API; runs are not scheduled. To check hosted storage before a deploy, run the test suite against a disposable Neon branch: set `TEST_DATABASE_URL` to that branch's URL (it drops and recreates the tables) and run the usual unittest command with `pg8000` installed.
 

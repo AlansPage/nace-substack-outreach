@@ -92,6 +92,7 @@ The same code deploys to Vercel for a shared workspace: Google sign-in, a Neon P
 (`pg8000` is the only package, used only in hosted mode), and private inputs pushed from your machine
 with `facts-push` and `pilot`. **Sign-in is open to any Google account unless you set
 `ALLOWED_EMAIL_DOMAIN` or `ALLOWED_EMAILS`**, and everyone signed in can read facts and contact routes.
+With `TEAM_PASSWORD` set, sign-in is a name plus one shared team password instead, with no Google setup.
 Setup steps are in [`docs/SUBSTACK_OUTREACH.md`](docs/SUBSTACK_OUTREACH.md#hosted-team-workspace-vercel).
 
 | Hosted piece | Location |

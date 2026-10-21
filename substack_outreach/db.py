@@ -68,9 +68,12 @@ def connect(url):
     target = resolve(url)
     if is_postgres(target):
         db = PgConnection(target)
-        db.executescript(POSTGRES_SCHEMA)
-        for table, column in ADDED_COLUMNS:
-            db.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} TEXT")
+        # DDL waits for locks held by running writes (CREATE INDEX, ALTER TABLE), so a request that ran it
+        # on every connection stalled behind any upload. Read the catalog first; change the schema only when needed.
+        if not pg_schema_ready(db):
+            db.executescript(POSTGRES_SCHEMA)
+            for table, column in ADDED_COLUMNS:
+                db.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} TEXT")
         db.commit()
         return db
     Path(target).parent.mkdir(parents=True, exist_ok=True)
@@ -85,6 +88,19 @@ def connect(url):
             db.execute(f"ALTER TABLE {table} ADD COLUMN {column} TEXT")
     db.commit()
     return db
+
+
+SCHEMA_TABLES = set(re.findall(r"CREATE TABLE IF NOT EXISTS (\w+)", TABLES))
+SCHEMA_INDEXES = set(re.findall(r"CREATE INDEX IF NOT EXISTS (\w+)", TABLES))
+
+
+def pg_schema_ready(db):
+    """True when every table, index and later-added column exists; catalog reads take no table locks."""
+    tables = {r[0] for r in db.execute("SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema()")}
+    indexes = {r[0] for r in db.execute("SELECT indexname FROM pg_indexes WHERE schemaname = current_schema()")}
+    columns = {(r[0], r[1]) for r in db.execute(
+        "SELECT table_name, column_name FROM information_schema.columns WHERE table_schema = current_schema()")}
+    return SCHEMA_TABLES <= tables and SCHEMA_INDEXES <= indexes and set(ADDED_COLUMNS) <= columns
 
 
 def translate(sql):
