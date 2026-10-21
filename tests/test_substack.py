@@ -1297,6 +1297,25 @@ class HostedTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'at least 12'):
             self.auth.AuthSettings.from_env(env | {'TEAM_PASSWORD': 'short'})
 
+    def test_browser_form_posts_with_hidden_origin_are_accepted_only_same_origin(self):
+        env = {k: v for k, v in self.env.items() if not k.startswith('GOOGLE_')} | {'TEAM_PASSWORD': 'correct horse battery'}
+        self.env = env
+        body = urllib_parse.urlencode({'name': 'Dior', 'password': 'correct horse battery'}).encode()
+        form = {'Content-Type': 'application/x-www-form-urlencoded'}
+        # Chrome's real sign-in post: the page's no-referrer policy turns Origin into "null".
+        self.assertEqual(self.request('POST', '/api/auth/login', form | {'Origin': 'null', 'Sec-Fetch-Site': 'same-origin'}, body)[0], 302)
+        self.assertEqual(self.request('POST', '/api/auth/login', form | {'Origin': 'null', 'Sec-Fetch-Site': 'cross-site'}, body)[0], 403)
+        self.assertEqual(self.request('POST', '/api/auth/login', form | {'Origin': 'https://evil.example'}, body)[0], 403)
+        # Another address of the same deployment: its own origin matches the Host it was served from.
+        self.assertEqual(self.request('POST', '/api/auth/login', form | {'Origin': 'https://outreach.example.test'}, body)[0], 302)
+        settings = self.auth.AuthSettings.from_env(env)
+        cookie = f"{self.auth.SESSION_COOKIE}={self.auth.session_value(settings, {'sub': '1', 'email': 'dior'})}"
+        api = {'Cookie': cookie, 'Content-Type': 'application/json', 'X-Local-Token': self.auth.csrf_token(settings, cookie),
+               'Origin': 'null', 'Sec-Fetch-Site': 'same-origin'}
+        payload = dumps({'reason': 'Not a fit'}).encode()
+        self.assertEqual(self.request('POST', f'/api/substack/publication/{self.pid}/skip', api, payload)[0], 200)
+        self.assertEqual(self.request('POST', f'/api/substack/publication/{self.pid}/skip', api | {'Sec-Fetch-Site': 'cross-site'}, payload)[0], 403)
+
     def test_claims_cookies_and_settings_are_checked(self):
         auth, s = self.auth, self.settings
         now = 1_800_000_000
