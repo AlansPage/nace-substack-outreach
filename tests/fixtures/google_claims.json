@@ -1,0 +1,22 @@
+{
+  "env": {
+    "GOOGLE_CLIENT_ID": "test-client.apps.googleusercontent.com",
+    "GOOGLE_CLIENT_SECRET": "test-secret-not-real",
+    "SESSION_SECRET": "0123456789abcdef0123456789abcdef-test-only",
+    "APP_ORIGIN": "https://outreach.example.test"
+  },
+  "claims": {
+    "iss": "https://accounts.google.com",
+    "aud": "test-client.apps.googleusercontent.com",
+    "sub": "1234567890",
+    "email": "Reviewer@Example.com",
+    "email_verified": true,
+    "hd": "example.com"
+  },
+  "token_response": {
+    "access_token": "ya29.fixture-not-real",
+    "expires_in": 3599,
+    "token_type": "Bearer",
+    "scope": "openid https://www.googleapis.com/auth/userinfo.email"
+  }
+}

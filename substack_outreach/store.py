@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 from pathlib import Path
 
 from urllib.parse import urlsplit
 
 from .common import canonical, classify, digest, dumps, is_profile, now, publication_url
+from .db import connect
 from .workbook import EXPECTED, identifier, read_workbook
 
 DNC_MATCHERS = ("hosts", "author_names", "names", "pub_ids")
@@ -40,45 +40,16 @@ def dnc_match(entries, data):
 
 
 class Store:
-    def __init__(self, path):
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
-        self.db = sqlite3.connect(path, timeout=20)
-        self.db.row_factory = sqlite3.Row
-        self.db.execute("PRAGMA foreign_keys=ON")
-        self.db.execute("PRAGMA journal_mode=WAL")
-        self.db.executescript("""
-        CREATE TABLE IF NOT EXISTS publications (
-          id INTEGER PRIMARY KEY, data TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'Imported',
-          score INTEGER NOT NULL DEFAULT 0, shortlisted INTEGER NOT NULL DEFAULT 0,
-          pilot INTEGER NOT NULL DEFAULT 0, author_key TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS aliases (key TEXT PRIMARY KEY, publication_id INTEGER NOT NULL REFERENCES publications(id));
-        CREATE TABLE IF NOT EXISTS imports (fingerprint TEXT PRIMARY KEY, path TEXT, headers TEXT, at TEXT);
-        CREATE TABLE IF NOT EXISTS source_rows (fingerprint TEXT, row_number INTEGER, publication_id INTEGER,
-          data TEXT NOT NULL, PRIMARY KEY(fingerprint,row_number));
-        CREATE TABLE IF NOT EXISTS articles (id INTEGER PRIMARY KEY, publication_id INTEGER NOT NULL REFERENCES publications(id),
-          url TEXT NOT NULL, data TEXT NOT NULL, UNIQUE(publication_id,url));
-        CREATE TABLE IF NOT EXISTS contacts (id INTEGER PRIMARY KEY, author_key TEXT NOT NULL,
-          contact_key TEXT, channel TEXT, event TEXT, at TEXT, source TEXT, note TEXT, dedup TEXT UNIQUE);
-        CREATE TABLE IF NOT EXISTS suppressions (key TEXT PRIMARY KEY, reason TEXT, at TEXT);
-        CREATE TABLE IF NOT EXISTS identities (alias TEXT PRIMARY KEY, author_key TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS drafts (id INTEGER PRIMARY KEY, publication_id INTEGER NOT NULL REFERENCES publications(id),
-          version INTEGER NOT NULL, data TEXT NOT NULL, hash TEXT NOT NULL, approved_hash TEXT, approved_by TEXT,
-          approved_at TEXT, created_at TEXT, UNIQUE(publication_id,version));
-        CREATE TABLE IF NOT EXISTS registry_history (hash TEXT PRIMARY KEY, version INTEGER, data TEXT, at TEXT);
-        CREATE TABLE IF NOT EXISTS runs (id INTEGER PRIMARY KEY, kind TEXT, started_at TEXT, finished_at TEXT,
-          requests INTEGER DEFAULT 0, reserved_usd REAL DEFAULT 0, usage TEXT DEFAULT '[]', error TEXT);
-        CREATE TABLE IF NOT EXISTS cache (key TEXT PRIMARY KEY, data TEXT NOT NULL, at TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY, publication_id INTEGER, kind TEXT, detail TEXT, at TEXT);
-        CREATE INDEX IF NOT EXISTS pub_queue ON publications(pilot,score);
-        CREATE INDEX IF NOT EXISTS pub_author ON publications(author_key);
-        """)
-        self.db.commit()
+    def __init__(self, path, actor=None):
+        self.db = connect(path)
+        # Who acted, for events written through this store (the signed-in user in hosted mode).
+        self.actor = actor
 
     def close(self):
         self.db.close()
 
     def event(self, pid, kind, detail):
-        self.db.execute("INSERT INTO events(publication_id,kind,detail,at) VALUES(?,?,?,?)", (pid, kind, dumps(detail), now()))
+        self.db.execute("INSERT INTO events(publication_id,kind,detail,at,actor) VALUES(?,?,?,?,?)", (pid, kind, dumps(detail), now(), self.actor))
 
     def get(self, pid):
         row = self.db.execute("SELECT * FROM publications WHERE id=?", (pid,)).fetchone()

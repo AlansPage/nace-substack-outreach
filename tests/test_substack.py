@@ -1,16 +1,18 @@
 import copy
 import io
 import json
+import os
 import tempfile
 import unittest
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from unittest.mock import patch
+from urllib.parse import parse_qs
 from zipfile import ZipFile
 
 from substack_outreach.common import FITS, canonical, classify, dumps, html_email, is_profile, now, publication_url
-from substack_outreach.config import ROOT, load_config
-from substack_outreach.evidence import ASKS, BASE_CLAIMS, evidence_checks, prepare_evidence, style_checks
+from substack_outreach.config import ROOT, load_config, load_hosted_config
+from substack_outreach.evidence import ASKS, BASE_CLAIMS, evidence_checks, prepare_evidence, push_registry, style_checks
 from substack_outreach.fixtures import add_fixture, previews
 from substack_outreach.models import INSTRUCTIONS, SCHEMA, LocalWriter, MockWriter, OpenAIWriter, writing_input
 from html import escape as html_escape
@@ -20,6 +22,17 @@ from substack_outreach.store import load_dnc
 from substack_outreach.workbook import identifier, read_workbook
 
 FIXTURES = Path(__file__).resolve().parent / 'fixtures'
+# Set to a disposable Postgres database (with pg8000 installed) to run the pipeline suite against hosted storage.
+TEST_DATABASE_URL = os.environ.get('TEST_DATABASE_URL', '')
+
+
+def reset_postgres(url):
+    from substack_outreach.db import PgConnection
+    db = PgConnection(url)
+    for table in ('events', 'cache', 'runs', 'facts_registry', 'registry_history', 'drafts', 'identities', 'suppressions',
+                  'contacts', 'articles', 'source_rows', 'imports', 'aliases', 'publications'):
+        db.execute(f'DROP TABLE IF EXISTS {table} CASCADE')
+    db.commit(); db.close()
 
 
 def workbook(path, rows):
@@ -45,7 +58,9 @@ class PipelineTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.path = Path(self.temp.name)
         self.config = load_config()
-        self.config['database'] = str(self.path / 'test.sqlite3')
+        self.config['database'] = TEST_DATABASE_URL or str(self.path / 'test.sqlite3')
+        if TEST_DATABASE_URL:
+            reset_postgres(TEST_DATABASE_URL)
         self.config['registry_path'] = str(self.path / 'facts.json')
         self.facts = json.loads((ROOT / 'substack_outreach/facts.example.json').read_text(encoding='utf-8'))
         (self.path / 'facts.json').write_text(dumps(self.facts), encoding='utf-8')
@@ -463,7 +478,7 @@ class PipelineTests(unittest.TestCase):
             collector().permission(self.p.store.get(pid))
         # Unresolved publication URL.
         pid = self.default_permission_pub()
-        self.p.store.db.execute("UPDATE publications SET data=json_set(data,'$.publication_url','') WHERE id=?", (pid,))
+        pub = self.p.store.get(pid); pub['publication_url'] = ''; self.p.store.save(pub); self.p.store.db.commit()
         with self.assertRaisesRegex(ValueError, 'SOURCE_PERMISSION_REQUIRED'):
             collector().permission(self.p.store.get(pid))
         # Expired review date and the default null value.
@@ -565,8 +580,9 @@ class PipelineTests(unittest.TestCase):
 
     def bare_pub(self, name, url, author):
         pid = self.pub(name, author)
-        self.p.store.db.execute("UPDATE publications SET data=json_set(data,'$.publication_url',?,'$.contact_route','','$.contact_source_url','','$.contact_kind','','$.contact_confirmed',json('false')) WHERE id=?", (url, pid))
-        self.p.store.db.commit()
+        pub = self.p.store.get(pid)
+        pub.update(publication_url=url, contact_route='', contact_source_url='', contact_kind='', contact_confirmed=False)
+        self.p.store.save(pub); self.p.store.db.commit()
         return pid
 
     def test_reply_to_import_matches_by_url_then_host_and_reports_the_rest(self):
@@ -835,6 +851,114 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(self.p.store.metrics()['research_failed_attempts'], 0)
 
 
+    def test_every_statement_the_code_issues_translates_to_postgres(self):
+        from substack_outreach.db import translate
+        recorder = RecordingConnection(self.p.store.db)
+        self.p.store.db = recorder
+        pid, _ = self.ready()
+        self.p.action(pid, 'approve', {'reviewer': 'Human', 'semantic_review_confirmed': True})
+        self.p.export('csv'); self.p.export('sendsheet'); self.p.queue(search='Test'); self.p.store.metrics()
+        self.p.match_publication('https://testing.example')
+        other = self.pub('Other', 'author:7')
+        self.p.action(other, 'history', {'channel': 'X', 'source': 'https://x.example/1'})
+        self.p.action(other, 'dnc', {'reason': 'Opt-out'})
+        self.config.update(collect_contacts=True, network_enabled=True)
+        third = self.bare_pub('Third', 'https://third.example', 'author:3')
+        with patch.object(Collector, 'allowed_get', return_value=(FIXTURES / 'about_page.html').read_bytes()):
+            self.p.collect_contacts(5)
+        add_fixture(self.p)
+        push_registry(self.p.store, self.facts, 'Test')
+        self.assertGreater(len(set(recorder.sql)), 40)
+        for sql in set(recorder.sql):
+            text, _ = translate(sql)
+            if text is None:
+                continue
+            for sqlite_only in ('INSERT OR', 'json_extract', 'json_set', 'PRAGMA'):
+                self.assertNotIn(sqlite_only, text, sql)
+
+    def test_translation_rules(self):
+        from substack_outreach.db import translate
+        self.assertEqual(translate("INSERT OR REPLACE INTO cache VALUES(?,?,?)"),
+                         ("INSERT INTO cache(key,data,at) VALUES(?,?,?) ON CONFLICT (key) DO UPDATE SET data=EXCLUDED.data, at=EXCLUDED.at", False))
+        self.assertEqual(translate("INSERT OR IGNORE INTO identities VALUES(?,?)"), ("INSERT INTO identities VALUES(?,?) ON CONFLICT DO NOTHING", False))
+        self.assertEqual(translate("INSERT INTO runs(kind,started_at) VALUES(?,?)"), ("INSERT INTO runs(kind,started_at) VALUES(?,?) RETURNING id", True))
+        self.assertEqual(translate("SELECT id FROM publications WHERE json_extract(data,'$.publication_url')=?")[0],
+                         "SELECT id FROM publications WHERE (data::jsonb->>'publication_url')=?")
+        self.assertEqual(translate("SELECT count(*) FROM publications WHERE data LIKE ?")[0], "SELECT count(*) FROM publications WHERE data ILIKE ?")
+        self.assertEqual(translate("PRAGMA foreign_keys=ON"), (None, False))
+
+    def test_postgres_connection_with_a_stand_in_driver(self):
+        import sys, types
+        from substack_outreach.db import PgConnection
+        calls = {'sql': [], 'commits': 0, 'rollbacks': 0}
+        class FakeCursor:
+            description = None
+            def execute(self, sql, params):
+                calls['sql'].append((sql, params))
+                self.description = [('id',)] if 'RETURNING id' in sql else ([('status',)] if sql.startswith('SELECT') else None)
+            def fetchall(self):
+                return [[41]] if self.description == [('id',)] else [['Approved']]
+            def close(self):
+                pass
+        class FakeConnection:
+            def cursor(self): return FakeCursor()
+            def commit(self): calls['commits'] += 1
+            def rollback(self): calls['rollbacks'] += 1
+            def close(self): pass
+        dbapi = types.SimpleNamespace(paramstyle='format', connect=lambda **kw: calls.update(kwargs=kw) or FakeConnection())
+        module = types.ModuleType('pg8000'); module.dbapi = dbapi
+        with patch.dict(sys.modules, {'pg8000': module, 'pg8000.dbapi': dbapi}):
+            db = PgConnection('postgresql://user:p%40ss@db.example:5433/outreach?sslmode=require')
+            self.assertEqual(dbapi.paramstyle, 'qmark')
+            self.assertEqual({k: calls['kwargs'][k] for k in ('user', 'password', 'host', 'port', 'database')},
+                             {'user': 'user', 'password': 'p@ss', 'host': 'db.example', 'port': 5433, 'database': 'outreach'})
+            self.assertIsNotNone(calls['kwargs']['ssl_context'])
+            with db:
+                self.assertEqual(db.execute('INSERT INTO runs(kind,started_at) VALUES(?,?)', ('x', 'now')).lastrowid, 41)
+            self.assertEqual(db.execute('SELECT status FROM publications').fetchone()['status'], 'Approved')
+            with self.assertRaises(RuntimeError), db:
+                raise RuntimeError('boom')
+        self.assertEqual((calls['commits'], calls['rollbacks']), (1, 1))
+        self.assertEqual(calls['sql'][0], ('INSERT INTO runs(kind,started_at) VALUES(?,?) RETURNING id', ('x', 'now')))
+
+    def test_postgres_rows_behave_like_sqlite_rows(self):
+        from substack_outreach.db import Cursor, Row, is_postgres, resolve
+        row = Row((7, 'Approved'), ['id', 'status'])
+        self.assertEqual((row[0], row['status'], dict(row)), (7, 'Approved', {'id': 7, 'status': 'Approved'}))
+        self.assertEqual(Cursor([row], 7).lastrowid, 7)
+        with patch.dict('os.environ', {'DATABASE_URL': 'postgresql://u:p@db.example/x'}):
+            self.assertTrue(is_postgres('env:DATABASE_URL'))
+        with patch.dict('os.environ', {}, clear=True), self.assertRaisesRegex(ValueError, 'DATABASE_URL is not set'):
+            resolve('env:DATABASE_URL')
+        self.assertFalse(is_postgres(str(self.path / 'x.sqlite3')))
+
+    def test_registry_from_database_and_actor_attribution(self):
+        self.config['registry_path'] = 'database'
+        with self.assertRaisesRegex(ValueError, 'run facts-push'):
+            self.p.facts()
+        first = push_registry(self.p.store, self.facts, 'Pusher')
+        self.assertEqual((first['entries'], first['approved']), (len(self.facts['entries']), 0))
+        self.assertEqual(self.p.facts()[0]['version'], self.facts['version'])
+        newer = copy.deepcopy(self.facts); newer['version'] += 1
+        push_registry(self.p.store, newer, 'Pusher')
+        self.assertEqual(self.p.facts()[0]['version'], newer['version'])
+        bad = copy.deepcopy(self.facts); bad['entries'][0]['approval_status'] = 'approved'
+        with self.assertRaisesRegex(ValueError, 'approved_by and approved_at'):
+            push_registry(self.p.store, bad, 'Pusher')
+        self.p.store.close()
+        self.p = Pipeline(self.config, actor='reviewer@example.com')
+        pid = self.pub()
+        self.p.action(pid, 'skip', {'reason': 'Not a fit'})
+        self.assertEqual(self.p.store.db.execute("SELECT actor FROM events WHERE kind='approval_invalidated'").fetchone()[0], 'reviewer@example.com')
+
+    def test_hosted_config_fixes_storage_and_refuses_local_provider(self):
+        config = load_hosted_config({'SUBSTACK_CONFIG': dumps({'database': 'elsewhere.sqlite3', 'batch_size': 5})})
+        self.assertEqual((config['database'], config['registry_path'], config['hosted'], config['batch_size']), ('env:DATABASE_URL', 'database', True, 5))
+        with self.assertRaisesRegex(ValueError, 'not valid JSON'):
+            load_hosted_config({'SUBSTACK_CONFIG': '{bad'})
+        with self.assertRaisesRegex(ValueError, 'provider local'):
+            load_hosted_config({'SUBSTACK_CONFIG': dumps({'provider': 'local', 'model': 'm'})})
+
 
 class WorkbookErrorTests(unittest.TestCase):
     """Structurally broken .xlsx files must fail as one ValueError, never a raw traceback."""
@@ -909,6 +1033,173 @@ class CliConfigErrorTests(unittest.TestCase):
         self.assertEqual(r.returncode, 2)
         self.assertTrue(r.stderr.startswith('Error: config is not valid JSON'), r.stderr)
         self.assertNotIn('Traceback', r.stderr)
+
+class RecordingConnection:
+    """Wraps the SQLite connection and records every statement the code issues."""
+    def __init__(self, db):
+        self.db, self.sql = db, []
+
+    def execute(self, sql, params=()):
+        self.sql.append(sql)
+        return self.db.execute(sql, params)
+
+    def __getattr__(self, name):
+        return getattr(self.db, name)
+
+    def __enter__(self):
+        return self.db.__enter__()
+
+    def __exit__(self, *exc):
+        return self.db.__exit__(*exc)
+
+
+class FakeSocket:
+    def __init__(self, data):
+        self.rfile, self.out = io.BytesIO(data), io.BytesIO()
+
+    def makefile(self, mode, *args, **kwargs):
+        return self.rfile
+
+    def sendall(self, data):
+        self.out.write(data)
+
+
+class HostedTests(unittest.TestCase):
+    def setUp(self):
+        from substack_outreach import auth
+        self.auth = auth
+        self.temp = tempfile.TemporaryDirectory()
+        self.path = Path(self.temp.name)
+        fx = json.loads((FIXTURES / 'google_claims.json').read_text(encoding='utf-8'))
+        self.env = dict(fx['env'], DATABASE_URL=str(self.path / 'hosted.sqlite3'), SUBSTACK_CONFIG=dumps({'batch_size': 5}))
+        self.claims, self.token_response = fx['claims'], fx['token_response']
+        self.settings = auth.AuthSettings.from_env(self.env)
+        # The storage adapter resolves env:DATABASE_URL from the process environment, as on Vercel.
+        self.environ = patch.dict('os.environ', {'DATABASE_URL': self.env['DATABASE_URL']})
+        self.environ.start()
+        facts = json.loads((ROOT / 'substack_outreach/facts.example.json').read_text(encoding='utf-8'))
+        p = Pipeline(load_hosted_config(self.env))
+        push_registry(p.store, facts, 'Test')
+        cur = p.store.db.execute('INSERT INTO publications(data,score,author_key,pilot,shortlisted,status) VALUES(?,100,?,1,1,?)',
+                                 (dumps({'publication': 'Hosted test', 'publication_url': 'https://hosted.example', 'source': {}, 'fit_category': FITS[0],
+                                         'fit_reasons': [], 'import_flags': [], 'research': {}, 'evidence': None, 'author_name': 'A'}), 'author:1', 'Shortlisted'))
+        self.pid = cur.lastrowid
+        p.store.db.commit(); p.store.close()
+
+    def tearDown(self):
+        self.environ.stop()
+        self.temp.cleanup()
+
+    def request(self, method, path, headers=None, body=b''):
+        from substack_outreach.hosted import handler
+        env = self.env
+        class Handler(handler):
+            environ = env
+        lines = [f'{method} {path} HTTP/1.1', 'Host: outreach.example.test'] + [f'{k}: {v}' for k, v in (headers or {}).items()]
+        if body:
+            lines.append(f'Content-Length: {len(body)}')
+        sock = FakeSocket(('\r\n'.join(lines) + '\r\n\r\n').encode() + body)
+        Handler(sock, ('127.0.0.1', 0), None)
+        head, _, payload = sock.out.getvalue().partition(b'\r\n\r\n')
+        head = head.decode('latin-1').split('\r\n')
+        return int(head[0].split()[1]), [h.split(': ', 1) for h in head[1:]], payload
+
+    def signed_in(self, email='Reviewer@Example.com'):
+        value = self.auth.session_value(self.settings, {'sub': '1', 'email': email.lower()})
+        return f'{self.auth.SESSION_COOKIE}={value}'
+
+    def test_sign_in_flow_and_signed_out_refusal(self):
+        status, _, body = self.request('GET', '/api/index?path=substack/bootstrap')
+        self.assertEqual((status, json.loads(body)['login']), (401, '/api/auth/login'))
+        status, headers, _ = self.request('GET', '/api/auth/login')
+        location = dict(headers)['Location']
+        self.assertEqual(status, 302)
+        self.assertTrue(location.startswith('https://accounts.google.com/o/oauth2/v2/auth?'))
+        params = {k: v[0] for k, v in parse_qs(location.split('?', 1)[1]).items()}
+        self.assertEqual((params['redirect_uri'], params['scope'], params['client_id']),
+                         ('https://outreach.example.test/api/auth/callback', 'openid email', self.settings.client_id))
+        flow_cookie = next(v for k, v in headers if k == 'Set-Cookie' and v.startswith('ss_oauth='))
+        self.assertIn('HttpOnly; Secure; SameSite=Lax', flow_cookie)
+        flow = flow_cookie.split(';')[0]
+        claims = dict(self.claims, nonce=params['nonce'], exp=int(__import__('time').time()) + 600)
+        with patch('substack_outreach.auth.exchange_code', return_value=claims):
+            status, _, _ = self.request('GET', '/api/auth/callback?code=c&state=wrong', {'Cookie': flow})
+            self.assertEqual(status, 400)
+            status, headers, _ = self.request('GET', f"/api/auth/callback?code=c&state={params['state']}", {'Cookie': flow})
+        self.assertEqual((status, dict(headers)['Location']), (302, '/'))
+        session = next(v for k, v in headers if k == 'Set-Cookie' and v.startswith('ss_session=')).split(';')[0]
+        status, _, body = self.request('GET', '/api/substack/bootstrap', {'Cookie': session})
+        boot = json.loads(body)
+        self.assertEqual((status, boot['user'], boot['hosted']), (200, {'email': 'reviewer@example.com'}, True))
+        self.assertEqual(boot['token'], self.auth.csrf_token(self.settings, session))
+
+    def test_mutations_need_origin_and_session_token_and_record_actor(self):
+        cookie = self.signed_in()
+        token = self.auth.csrf_token(self.settings, cookie)
+        body = dumps({'reason': 'Not a fit'}).encode()
+        base = {'Cookie': cookie, 'Content-Type': 'application/json', 'Origin': 'https://outreach.example.test', 'X-Local-Token': token}
+        for broken in ({'Origin': 'https://evil.example'}, {'X-Local-Token': 'nope'}):
+            status, _, _ = self.request('POST', f'/api/substack/publication/{self.pid}/skip', base | broken, body)
+            self.assertEqual(status, 403)
+        status, _, _ = self.request('POST', f'/api/substack/publication/{self.pid}/skip', {k: v for k, v in base.items() if k != 'Cookie'}, body)
+        self.assertEqual(status, 401)
+        status, _, payload = self.request('POST', f'/api/index?path=substack/publication/{self.pid}/skip', base, body)
+        self.assertEqual((status, json.loads(payload)['status']), (200, 'Skipped'))
+        p = Pipeline(load_hosted_config(self.env))
+        self.assertEqual(p.store.db.execute("SELECT actor FROM events WHERE kind='approval_invalidated'").fetchone()[0], 'reviewer@example.com')
+        p.store.close()
+
+    def test_claims_cookies_and_settings_are_checked(self):
+        auth, s = self.auth, self.settings
+        now = 1_800_000_000
+        good = dict(self.claims, nonce='n', exp=now + 60)
+        self.assertEqual(auth.check_claims(s, good, 'n', now), {'sub': '1234567890', 'email': 'reviewer@example.com'})
+        for change, message in (({'aud': 'other'}, 'not issued'), ({'iss': 'https://evil.example'}, 'not issued'), ({'exp': now - 1}, 'expired'),
+                                ({'nonce': 'x'}, 'matched'), ({'email_verified': False}, 'confirm an email')):
+            with self.assertRaisesRegex(ValueError, message):
+                auth.check_claims(s, dict(good, **change), 'n', now)
+        domain = auth.AuthSettings.from_env(dict(self.env, ALLOWED_EMAIL_DOMAIN='nace.ai'))
+        with self.assertRaisesRegex(ValueError, 'only accepts accounts from nace.ai'):
+            auth.check_claims(domain, good, 'n', now)
+        listed = auth.AuthSettings.from_env(dict(self.env, ALLOWED_EMAILS='someone@else.example'))
+        with self.assertRaisesRegex(ValueError, 'sign-in list'):
+            auth.check_claims(listed, good, 'n', now)
+        value = auth.session_value(s, {'sub': '1', 'email': 'a@b.example'}, now)
+        self.assertEqual(auth.read_session(s, f'ss_session={value}', now + 10), {'sub': '1', 'email': 'a@b.example'})
+        self.assertIsNone(auth.read_session(s, f'ss_session={value}', now + auth.SESSION_SECONDS + 1))
+        tampered = value[:-2] + ('AA' if not value.endswith('AA') else 'BB')
+        self.assertIsNone(auth.read_session(s, f'ss_session={tampered}', now + 10))
+        for missing in ('SESSION_SECRET', 'APP_ORIGIN'):
+            with self.assertRaisesRegex(ValueError, missing):
+                auth.AuthSettings.from_env({k: v for k, v in self.env.items() if k != missing})
+        with self.assertRaisesRegex(ValueError, 'APP_ORIGIN'):
+            auth.AuthSettings.from_env(dict(self.env, APP_ORIGIN='http://outreach.example.test'))
+
+    def test_code_exchange_reads_only_the_id_token(self):
+        payload = dict(self.claims, nonce='n', exp=1)
+        id_token = 'h.' + self.auth.b64(dumps(payload).encode()) + '.sig'
+        response = io.BytesIO(dumps(dict(self.token_response, id_token=id_token)).encode())
+        opener = type('Opener', (), {'open': lambda self, request, timeout: response})()
+        self.assertEqual(self.auth.exchange_code(self.settings, 'code', opener)['sub'], '1234567890')
+        failing = type('Opener', (), {'open': lambda self, request, timeout: io.BytesIO(b'{"error": "invalid_grant", "access_token": "secret"}')})()
+        with self.assertRaises(ValueError) as ctx:
+            self.auth.exchange_code(self.settings, 'code', failing)
+        self.assertNotIn('secret', str(ctx.exception))
+
+    def test_missing_configuration_is_a_clear_500(self):
+        self.env.pop('GOOGLE_CLIENT_SECRET')
+        status, _, body = self.request('GET', '/api/substack/bootstrap')
+        self.assertEqual(status, 500)
+        self.assertIn('GOOGLE_CLIENT_SECRET', json.loads(body)['error'])
+
+    def test_vercel_files_keep_private_inputs_out(self):
+        ignore = (ROOT / '.vercelignore').read_text(encoding='utf-8')
+        for private in ('.local/', '*.xlsx', 'substack.config.json', 'substack_outreach/facts.json', 'substack_outreach/dnc.json', '*.sqlite3'):
+            self.assertIn(private, ignore.splitlines())
+        vercel = json.loads((ROOT / 'vercel.json').read_text(encoding='utf-8'))
+        self.assertEqual(vercel['rewrites'], [{'source': '/api/(.*)', 'destination': '/api/index?path=$1'}])
+        self.assertEqual((ROOT / 'requirements.txt').read_text(encoding='utf-8').split('\n')[-2], 'pg8000==1.31.2')
+
 
 if __name__ == '__main__':
     unittest.main()

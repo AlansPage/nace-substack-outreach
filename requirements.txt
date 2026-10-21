@@ -1,0 +1,2 @@
+# Hosted mode only (Vercel + Postgres). The local worker never imports it and needs no packages.
+pg8000==1.31.2

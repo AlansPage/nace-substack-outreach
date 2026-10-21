@@ -48,3 +48,11 @@ test('about-page proposal shows confirm controls only while unresolved and escap
   assert.ok(!done.includes('confirm-contact') && done.includes('confirmed by Human'));
   assert.equal(C.proposalHTML(undefined), '');
 });
+
+test('hosted workspace shows who is signed in, escapes it, and offers sign-in when signed out', () => {
+  assert.equal(C.userHTML(undefined), '');
+  const chip = C.userHTML({ email: '<b>x@y.example</b>' });
+  assert.ok(chip.includes('&lt;b&gt;x@y.example') && chip.includes('href="/api/auth/logout"'));
+  assert.ok(C.signInHTML().includes('href="/api/auth/login"'));
+  assert.ok(C.proposalHTML({ status: 'proposed', contact_source_url: 'https://a.example/about', candidates: [] }, 'me@x.example').includes('value="me@x.example"'));
+});

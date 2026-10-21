@@ -27,6 +27,8 @@ def main():
     p = subs.add_parser("contacts-import", help="Import a Gmail reply-to export as unconfirmed contact routes")
     p.add_argument("file", help="JSON array of {publication_url, sender_name, reply_to, message_url}")
     p.add_argument("--report", default=".local/substack/contacts-import-report.json", help="Where unmatched/skipped/invalid records are written")
+    p = subs.add_parser("facts-push", help="Upload a validated facts registry into the configured (shared) database")
+    p.add_argument("file", help="Your facts.json; approval fields are uploaded exactly as written")
     p = subs.add_parser("research-import")
     p.add_argument("file", help="JSON object {publication_id, articles: [...]} or list of those objects")
     p = subs.add_parser("contact-import")
@@ -83,6 +85,10 @@ def main():
             report = pipeline.import_reply_to(json.loads(Path(args.file).read_text(encoding="utf-8-sig")))
             write_private(args.report, json.dumps(report, ensure_ascii=False, indent=2))
             result = {k: len(v) for k, v in report.items()} | {"report": args.report}
+        elif args.command == "facts-push":
+            from .evidence import push_registry
+            data = json.loads(Path(args.file).read_text(encoding="utf-8-sig"))
+            result = push_registry(pipeline.store, data, config["sender"]["name"])
         elif args.command == "generate":
             result = pipeline.generate(args.id, args.regenerate)
         elif args.command == "show":
