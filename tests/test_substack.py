@@ -1037,6 +1037,28 @@ class PipelineTests(unittest.TestCase):
             load_hosted_config({'SUBSTACK_CONFIG': dumps({'provider': 'local', 'model': 'm'})})
 
 
+class TeamPageTests(unittest.TestCase):
+    def test_team_page_bakes_substack_rows_ranked_and_escaped(self):
+        sys_path = str(ROOT / 'team_page')
+        import sys
+        sys.path.insert(0, sys_path)
+        try:
+            import build_team_page as tp
+        finally:
+            sys.path.remove(sys_path)
+        sample = json.loads((FIXTURES / 'all_channels_sample.json').read_text(encoding='utf-8'))
+        table = sample['sheets']['substack']
+        table['rows'].append(dict(table['rows'][0], _row=9, pub_id='1009', author_id='599', name='Close </script> tag',
+                                  url='https://closetag.substack.com', hero_text='LLM inference notes'))
+        rows = tp.writers(table, load_dnc(FIXTURES / 'dnc.json'))
+        self.assertEqual([w['name'] for w in rows][:2], ['Agent Notes', 'Close </script> tag'])
+        self.assertEqual([w['short'] for w in rows], [1, 1, 1, 0])  # the garden diary has no topical signal
+        page = tp.render(rows)
+        self.assertNotIn('__WRITERS__', page)
+        data = page.split('<script type="application/json" id="writers-data">')[1].split('</script>')[0]
+        self.assertEqual(len(json.loads(data)), 4)
+        self.assertNotIn('discord.gg', page)
+
 class WorkbookErrorTests(unittest.TestCase):
     """Structurally broken .xlsx files must fail as one ValueError, never a raw traceback."""
     NS = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'
