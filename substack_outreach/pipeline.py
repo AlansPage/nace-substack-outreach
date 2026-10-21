@@ -12,7 +12,7 @@ from .config import ROOT
 from .evidence import evidence_checks, prepare_evidence, registry, validate
 from .models import LocalWriter, MockWriter, OpenAIWriter, writing_input
 from .sources import Collector, Run, save_articles
-from .store import Store, load_dnc
+from .store import CHANNEL_SQL, CHANNELS, Store, channel_for, load_dnc
 from .workbook import find_workbook
 
 
@@ -43,9 +43,15 @@ class Pipeline:
                 draft["approved_hash"] = None
         return pub
 
-    def queue(self, scope="pilot", search="", status="", limit=100, offset=0):
+    def channel_counts(self):
+        counts = dict(self.store.db.execute(f"SELECT {CHANNEL_SQL} AS ch, count(*) FROM publications GROUP BY ch").fetchall())
+        return {c: counts.get(c, 0) for c in CHANNELS}
+
+    def queue(self, scope="pilot", search="", status="", limit=100, offset=0, channel="substack"):
         self.facts()
-        where, args = [], []
+        if channel not in CHANNELS:
+            raise ValueError("Channel must be one of: " + ", ".join(CHANNELS))
+        where, args = [f"{CHANNEL_SQL}=?"], [channel]
         if scope in ("pilot", "shortlisted"):
             where.append(scope + "=1")
         if status:
@@ -61,6 +67,9 @@ class Pipeline:
         for r in rows:
             p = self.store.get(r[0])
             item = {k: p.get(k) for k in ("id", "publication", "author_name", "status", "fit_category", "fit_reasons", "owner", "score", "publication_url", "profile_url", "author_publications", "do_not_contact", "source_kind")}
+            item["channel"] = p.get("channel") or "substack"
+            src = p.get("source") or {}
+            item["reach"] = src.get("free_subscribers") or src.get("followers") or src.get("member_count")
             # Latest contact with this writer on any channel, shared across their publications.
             item["contacted"] = {k: p["previous_contact"][0].get(k) for k in ("channel", "event", "at", "actor")} if p["previous_contact"] else None
             items.append(item)
@@ -81,8 +90,9 @@ class Pipeline:
         sheet, headers, rows = data.get("sheet"), data.get("headers"), data.get("rows")
         if not isinstance(sheet, str) or not isinstance(headers, list) or not all(isinstance(h, str) and h for h in headers):
             raise ValueError("Upload needs a sheet name and a list of column headers")
-        if len(set(headers)) != len(headers) or not {"url", "pub_id"} & set(headers):
-            raise ValueError(f"Sheet {sheet!r} is not a Substack publication table (needs url or pub_id columns)")
+        channel = channel_for(headers)
+        if len(set(headers)) != len(headers) or channel is None:
+            raise ValueError(f"Sheet {sheet!r} is not a Substack, Medium or Discord table (needs url/pub_id, medium_url or invite_url columns)")
         if not isinstance(rows, list) or len(rows) > UPLOAD_MAX_ROWS or not all(isinstance(r, dict) for r in rows):
             raise ValueError(f"Upload rows as a list of objects, at most {UPLOAD_MAX_ROWS} per request")
         offset = int(data.get("offset") or 0)
@@ -90,8 +100,8 @@ class Pipeline:
         table = [(int(r["_row"]) if str(r.get("_row", "")).isdigit() else offset + n + 2, {h: cell(r.get(h)) for h in headers})
                  for n, r in enumerate(rows)]
         label = f"upload:{sheet} by {self.store.actor or 'local operator'}"
-        result = self.store.import_rows(headers, table, digest(["upload", sheet, headers, table]), label)
-        result["sheet"] = sheet
+        result = self.store.import_rows(headers, table, digest(["upload", sheet, headers, table]), label, channel)
+        result.update(sheet=sheet, channel=channel)
         return self.after_import(result) if data.get("last") is True else result
 
     def after_import(self, result, batch=None, shortlist=None):
@@ -479,13 +489,17 @@ class Pipeline:
             return self.sendsheet(scope)
         return render_export(self.export_rows(scope), fmt)
 
-    def export_rows(self, scope="pilot"):
+    def export_rows(self, scope="pilot", channel=None):
         rows = []
-        clause = " WHERE pilot=1" if scope == "pilot" else " WHERE shortlisted=1" if scope == "shortlisted" else ""
-        for r in self.store.db.execute("SELECT id FROM publications" + clause + " ORDER BY score DESC,id").fetchall():
+        where, args = (["pilot=1"] if scope == "pilot" else ["shortlisted=1"] if scope == "shortlisted" else []), []
+        if channel:
+            where.append(f"{CHANNEL_SQL}=?")
+            args.append(channel)
+        clause = " WHERE " + " AND ".join(where) if where else ""
+        for r in self.store.db.execute("SELECT id FROM publications" + clause + " ORDER BY score DESC,id", args).fetchall():
             p = self.detail(r[0])
             draft, e = p.get("draft") or {}, p.get("evidence") or {}
-            rows.append({"publication": p["publication"], "author": p["author_name"], "publication_url": p["publication_url"],
+            rows.append({"channel": p.get("channel") or "substack", "publication": p["publication"], "author": p["author_name"], "publication_url": p["publication_url"],
                          "article_url": e.get("article_url", ""), "supporting_excerpt": e.get("supporting_excerpt", ""),
                          "angle": e.get("drex_connection", ""), "contact": p.get("contact_route", ""), "contact_source": p.get("contact_source_url", ""),
                          "subject": draft.get("subject", ""), "email_body": draft.get("plain_text_body", ""),
@@ -502,7 +516,7 @@ def contacted_label(history):
     return " · ".join(str(v) for v in (c.get("event"), c.get("channel"), c.get("actor") or "", str(c.get("at") or "")[:10]) if v)
 
 
-EXPORT_FIELDS = ["publication", "author", "publication_url", "article_url", "supporting_excerpt", "angle", "contact", "contact_source",
+EXPORT_FIELDS = ["channel", "publication", "author", "publication_url", "article_url", "supporting_excerpt", "angle", "contact", "contact_source",
                  "subject", "email_body", "owner", "status", "contacted", "review_flags"]
 
 

@@ -37,7 +37,7 @@
     for (const [sheet, table] of Object.entries(tables)) {
       const rows = Array.isArray(table && table.rows) ? table.rows : [];
       const headers = Array.isArray(table.headers) ? table.headers : [...new Set(rows.flatMap(r => Object.keys(r || {})).filter(k => k !== '_row'))];
-      if (!rows.length || !(headers.includes('url') || headers.includes('pub_id'))) { plan.skipped.push(sheet); continue; }
+      if (!rows.length || !['url', 'pub_id', 'medium_url', 'invite_url'].some(h => headers.includes(h))) { plan.skipped.push(sheet); continue; }
       const batches = [];
       let batch = [], size = 0;
       for (const row of rows) {
@@ -53,12 +53,15 @@
   const exportName = (disposition, fallback) => (String(disposition || '').match(/filename="([^"\/]+)"/) || [])[1] || fallback;
   const exportMessage = (name, rows, drafts) => `Exported ${name}: ${rows ?? '?'} rows, ${drafts ?? '?'} with an email draft. Check your Downloads folder.`
     + (Number(drafts) === 0 ? ' No drafts yet: rows still need research or a generated draft, so subject and body columns are empty.' : '');
-  globalThis.SubstackUIHelpers = { esc, safeURL, link, wordCount, lengthLabel, previewHTML, proposalHTML, userHTML, signInHTML, contactedHTML, uploadPlan, exportName, exportMessage };
+  const CHANNEL_LABELS = { substack: 'Substack', medium: 'Medium', discord: 'Discord' };
+  const channelButtonsHTML = (counts, current) => Object.keys(CHANNEL_LABELS).map(c =>
+    `<button type="button" data-channel="${c}" aria-pressed="${c === current}">${CHANNEL_LABELS[c]}<small>${esc(counts?.[c] ?? 0)}</small></button>`).join('');
+  globalThis.SubstackUIHelpers = { esc, safeURL, link, wordCount, lengthLabel, previewHTML, proposalHTML, userHTML, signInHTML, contactedHTML, uploadPlan, exportName, exportMessage, channelButtonsHTML };
   if (typeof document === 'undefined') return;
   const root = document.getElementById('tab-substack');
   if (!root) return;
   const $ = selector => root.querySelector(selector);
-  let boot = null, selected = null, scope = 'pilot', offset = 0, dirty = false, busy = false;
+  let boot = null, selected = null, scope = 'pilot', channel = 'substack', offset = 0, dirty = false, busy = false;
   const field = (id, label, value = '', area = false) => `<label class="ss-field">${esc(label)}${area ? `<textarea id="ss-${id}" rows="4">${esc(value)}</textarea>` : `<input id="ss-${id}" value="${esc(value)}">`}</label>`;
   const select = (id, label, options, value) => `<label class="ss-field">${esc(label)}<select id="ss-${id}">${options.map(o => `<option${o === value ? ' selected' : ''}>${esc(o)}</option>`).join('')}</select></label>`;
   const checked = value => value ? ' checked' : '';
@@ -75,6 +78,7 @@
     root.innerHTML = `<header class="ss-hero"><div><p class="ss-eyebrow">NACE AI · LOCAL RESEARCH WORKSPACE</p><h1>Substack outreach</h1><p>Evidence first. A short, personal invitation. A human decision.</p></div><span class="ss-chip">Manual sending only</span></header>
       <div id="ss-message" class="ss-message" role="status" aria-live="polite">Connecting to local worker…</div>
       <div id="ss-stats" class="ss-stats"></div>
+      <div class="ss-channels" id="ss-channels" role="group" aria-label="Channel"></div>
       <div class="ss-toolbar"><label>Queue <select id="ss-scope"><option value="pilot">20-publication pilot</option><option value="shortlisted">Shortlist</option><option value="all">All imported + fixture</option></select></label><label>Status <select id="ss-status"><option value="">All statuses</option></select></label><label class="ss-search">Search <input id="ss-search" type="search" placeholder="Publication, author, topic"></label><button id="ss-refresh">Refresh</button><button data-export="csv">Export CSV</button><button data-export="json">Export JSON</button><button id="ss-contacts">Propose contacts from about pages</button><button id="ss-upload">Upload JSON</button><input id="ss-upload-file" type="file" accept=".json,application/json" hidden></div>
       <div class="ss-layout"><aside class="ss-queue" aria-label="Publication queue"><div id="ss-list"></div><div class="ss-pagination"><button id="ss-prev">Previous</button><span id="ss-count"></span><button id="ss-next">Next</button></div></aside><section id="ss-detail" aria-label="Publication review"><div class="ss-empty"><h2>Choose a publication</h2><p>Review its sources, verify the name and contact route, then draft.</p><p>Subscriber counts are imported estimates. Metadata matches are only triage signals.</p></div></section></div>`;
   }
@@ -85,6 +89,7 @@
       boot = await api('bootstrap');
       $('#ss-scope').options[0].textContent = `${boot.batch_size}-publication pilot`;
       root.querySelector('.ss-hero').insertAdjacentHTML('beforeend', userHTML(boot.user));
+      $('#ss-channels').innerHTML = channelButtonsHTML(boot.channels, channel);
       $('#ss-contacts').disabled = !(boot.collect_contacts && boot.network_enabled);
       $('#ss-contacts').title = $('#ss-contacts').disabled ? 'Needs collect_contacts and network_enabled set to true in the local config' : `Reads up to ${boot.batch_size} pilot about pages`;
       $('#ss-status').insertAdjacentHTML('beforeend', boot.statuses.map(s => `<option>${esc(s)}</option>`).join(''));
@@ -104,16 +109,16 @@
   }
   const report = error => notice(error.message || String(error), true);
   async function refresh() {
-    const [queue, metrics] = await Promise.all([api(`queue?scope=${encodeURIComponent(scope)}&search=${encodeURIComponent(val('search'))}&status=${encodeURIComponent(val('status'))}&offset=${offset}`), api('metrics')]);
+    const [queue, metrics] = await Promise.all([api(`queue?channel=${channel}&scope=${encodeURIComponent(scope)}&search=${encodeURIComponent(val('search'))}&status=${encodeURIComponent(val('status'))}&offset=${offset}`), api('metrics')]);
     $('#ss-stats').innerHTML = [['Imported', metrics.imported_publications], ['Shortlisted', metrics.shortlisted_publications], ['Researched', metrics.research_completed], ['Draft versions', metrics.drafts_generated], ['Approved', metrics.drafts_approved]].map(([label, n]) => `<div><strong>${esc(n)}</strong><span>${label}</span></div>`).join('');
-    $('#ss-list').innerHTML = queue.items.map(p => `<button class="ss-row${selected?.id === p.id ? ' ss-selected' : ''}" data-pub="${p.id}"><span class="ss-row-title">${esc(p.publication || 'Unnamed publication')}</span><span>${esc(p.author_name || 'Author unknown')}</span><span class="ss-row-meta">${esc(p.fit_category)} · ${esc(p.status)}</span>${p.author_publications > 1 ? `<span class="ss-warning">${p.author_publications} publications share this author</span>` : ''}${p.do_not_contact ? '<span class="ss-warning">Do not contact</span>' : ''}${contactedHTML(p.contacted)}</button>`).join('') || '<p class="ss-empty">No records in this queue. Run the pilot command to import the workbook.</p>';
+    $('#ss-list').innerHTML = queue.items.map(p => `<button class="ss-row${selected?.id === p.id ? ' ss-selected' : ''}" data-pub="${p.id}"><span class="ss-row-title">${esc(p.publication || 'Unnamed publication')}</span><span>${esc(p.author_name || (p.channel === 'discord' ? 'Community' : 'Author unknown'))}${p.reach ? ' · ' + esc(Number(p.reach).toLocaleString()) + (p.channel === 'discord' ? ' members' : p.channel === 'medium' ? ' followers' : ' subscribers') : ''}</span><span class="ss-row-meta">${esc(p.fit_category)} · ${esc(p.status)}</span>${p.author_publications > 1 ? `<span class="ss-warning">${p.author_publications} publications share this author</span>` : ''}${p.do_not_contact ? '<span class="ss-warning">Do not contact</span>' : ''}${contactedHTML(p.contacted)}</button>`).join('') || '<p class="ss-empty">No records in this queue. Run the pilot command to import the workbook.</p>';
     $('#ss-count').textContent = `${queue.total ? offset + 1 : 0}–${Math.min(offset + queue.items.length, queue.total)} / ${queue.total}`;
     $('#ss-prev').disabled = offset === 0;
     $('#ss-next').disabled = offset + 100 >= queue.total;
   }
   async function exportFile(format) {
     notice(`Preparing the ${format.toUpperCase()} export…`);
-    const response = await fetch(`/api/substack/export?format=${format}&scope=${encodeURIComponent(scope)}`, { credentials: 'same-origin' });
+    const response = await fetch(`/api/substack/export?format=${format}&scope=${encodeURIComponent(scope)}&channel=${channel}`, { credentials: 'same-origin' });
     if (!response.ok) {
       const detail = await response.json().catch(() => ({}));
       throw new Error(`Export failed: ${detail.error || 'worker returned ' + response.status}`);
@@ -182,6 +187,17 @@
       busy = true;
       if (button.dataset.pub) return await open(Number(button.dataset.pub));
       if (button.id === 'ss-refresh') return await refresh();
+      if (button.dataset.channel) {
+        if (dirty) throw new Error('Save the edited draft before switching channels.');
+        channel = button.dataset.channel; offset = 0; selected = null;
+        // The pilot and shortlist are Substack-only; other channels list everyone.
+        const pick = $('#ss-scope');
+        [...pick.options].forEach(o => { o.disabled = channel !== 'substack' && o.value !== 'all'; });
+        if (channel !== 'substack') { pick.value = 'all'; scope = 'all'; }
+        root.querySelectorAll('[data-channel]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.channel === channel)));
+        $('#ss-detail').innerHTML = `<div class="ss-empty"><h2>Choose a ${channel === 'discord' ? 'server' : channel === 'medium' ? 'writer' : 'publication'}</h2><p>Claim it, mark it contacted, or skip it. Everyone sees the same record.</p></div>`;
+        return await refresh();
+      }
       if (button.id === 'ss-upload') { $('#ss-upload-file').click(); return; }
       if (button.id === 'ss-contacts') {
         notice('Reading about pages through the permission-gated collector…');

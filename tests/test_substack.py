@@ -317,9 +317,28 @@ class PipelineTests(unittest.TestCase):
         pub = self.p.store.get(1)
         self.assertEqual((pub['publication'], pub['source']['free_subscribers'], pub['author_publications']), ('Agent Notes', '12000', 2))
         self.assertTrue(self.p.store.db.execute("SELECT path FROM imports").fetchone()[0].startswith('upload:substack by '))
-        for other in ('Discord', 'mediun', 'Copy of hackernoon'):
-            with self.assertRaisesRegex(ValueError, 'not a Substack publication table'):
-                self.upload_sheet(other)
+        with self.assertRaisesRegex(ValueError, 'not a Substack, Medium or Discord table'):
+            self.upload_sheet('Copy of hackernoon')
+
+    def test_medium_and_discord_upload_into_their_own_channels(self):
+        self.upload_sheet('substack')
+        medium, discord = self.upload_sheet('mediun'), self.upload_sheet('Discord')
+        self.assertEqual((medium['channel'], medium['inserted'], discord['channel'], discord['inserted']), ('medium', 1, 'discord', 1))
+        self.assertEqual(self.p.channel_counts(), {'substack': 3, 'medium': 1, 'discord': 1})
+        # The Substack shortlist and pilot never take other channels.
+        self.assertEqual(self.p.store.db.execute('SELECT count(*) FROM publications WHERE shortlisted=1').fetchone()[0], 2)
+        m = self.p.queue(scope='all', channel='medium')['items']
+        self.assertEqual([(i['publication'], i['publication_url'], i['channel']) for i in m], [('Medium Writer', 'https://medium.com/@writer', 'medium')])
+        d = self.p.queue(scope='all', channel='discord')['items'][0]
+        self.assertEqual((d['publication'], d['author_name'], d['publication_url']), ('Example Server', 'Example', 'https://discord.gg/example'))
+        self.assertEqual(self.p.store.get(d['id'])['source']['member_count'], '1000')
+        self.assertTrue(self.upload_sheet('mediun')['resumed'])  # re-upload is recognised, not duplicated
+        self.p.action(m[0]['id'], 'contacted', {'confirmed': True, 'channel': 'Email'})
+        self.assertEqual(self.p.queue(scope='all', channel='medium')['items'][0]['contacted']['channel'], 'Email')
+        csv_text = self.p.export_rows('all', 'discord')
+        self.assertEqual([r['channel'] for r in csv_text], ['discord'])
+        with self.assertRaisesRegex(ValueError, 'Channel must be one of'):
+            self.p.queue(channel='twitter')
         with self.assertRaisesRegex(ValueError, 'at most 5000'):
             self.p.upload_rows({'sheet': 'substack', 'headers': ['url'], 'rows': [{}] * 5001})
 
@@ -349,7 +368,7 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual((status, content_type), (200, 'text/csv; charset=utf-8'))
         self.assertRegex(headers['Content-Disposition'], r'^attachment; filename="substack-pilot-\d{4}-\d{2}-\d{2}\.csv"$')
         self.assertEqual((headers['X-Export-Rows'], headers['X-Export-Drafts']), ('2', '1'))
-        self.assertTrue(body.startswith(chr(0xfeff) + 'publication,'))
+        self.assertTrue(body.startswith(chr(0xfeff) + 'channel,publication,'))
         self.assertIn('Contacted · Email', body)
         rows = json.loads(api_get(self.p, self.config, '/api/substack/export', {'format': 'json', 'scope': 'all'})[1])
         self.assertEqual(sorted(r['contacted'][:9] for r in rows), ['', 'Contacted'])

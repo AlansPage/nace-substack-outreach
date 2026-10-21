@@ -64,17 +64,17 @@ test('contacted marker shows channel, who and the date, escaped', () => {
   assert.ok(html.includes('&lt;i&gt;alice@example.com'));
 });
 
-test('upload plan takes the substack sheet of the all-channels export and batches it', () => {
+test('upload plan takes the Substack, Medium and Discord sheets and batches them', () => {
   const sample = JSON.parse(fs.readFileSync('tests/fixtures/all_channels_sample.json', 'utf8'));
   const plan = C.uploadPlan(sample);
-  assert.deepEqual([...plan.skipped], ['Discord', 'mediun', 'Copy of hackernoon']);
-  assert.equal(plan.tables.length, 1);
-  assert.equal(plan.tables[0].sheet, 'substack');
-  assert.equal(plan.tables[0].rows, 3);
-  assert.deepEqual([...plan.tables[0].headers], sample.sheets.substack.headers);
-  const small = C.uploadPlan(sample, 1500);
-  assert.ok(small.tables[0].batches.length > 1);
-  assert.equal(small.tables[0].batches.flat().length, 3);
+  assert.deepEqual([...plan.skipped], ['Copy of hackernoon']);
+  assert.deepEqual([...plan.tables.map(t => t.sheet)], ['Discord', 'mediun', 'substack']);
+  const substack = plan.tables.find(t => t.sheet === 'substack');
+  assert.equal(substack.rows, 3);
+  assert.deepEqual([...substack.headers], sample.sheets.substack.headers);
+  const small = C.uploadPlan(sample, 1500).tables.find(t => t.sheet === 'substack');
+  assert.ok(small.batches.length > 1);
+  assert.equal(small.batches.flat().length, 3);
   assert.equal(C.uploadPlan([{ url: 'https://a.substack.com', name: 'A' }]).tables[0].sheet, 'upload');
 });
 
@@ -84,4 +84,11 @@ test('export names the file from the server and says when there are no drafts ye
   assert.equal(C.exportName('attachment; filename="../../evil.csv"', 'safe.csv'), 'safe.csv');
   assert.ok(C.exportMessage('a.csv', '20', '0').includes('No drafts yet'));
   assert.ok(!C.exportMessage('a.csv', '20', '3').includes('No drafts yet'));
+});
+
+test('channel buttons show Substack, Medium and Discord with counts', () => {
+  const html = C.channelButtonsHTML({ substack: 15617, medium: 183, discord: 615 }, 'medium');
+  assert.ok(html.includes('data-channel="substack"') && html.includes('data-channel="discord"'));
+  assert.ok(html.includes('aria-pressed="true">Medium<small>183</small>'));
+  assert.equal(C.uploadPlan({ sheets: { Discord: { headers: ['name', 'invite_url'], rows: [{ name: 'x', invite_url: 'https://discord.gg/x' }] } } }).tables.length, 1);
 });
