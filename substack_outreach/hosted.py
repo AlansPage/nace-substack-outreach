@@ -7,6 +7,7 @@ database connection and attributes events to the signed-in email. Nothing here s
 from __future__ import annotations
 
 import os
+import time
 from http.server import BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlsplit
 
@@ -68,6 +69,8 @@ def handle(environ, method, raw_path, headers, read_body):
     except ValueError as exc:
         return response({"error": "Server configuration: " + str(exc)}, 500)
     cookie = headers.get("Cookie")
+    if settings.team_password and path == "/api/auth/login":
+        return team_login(settings, method, headers, read_body)
     if method == "GET" and path == "/api/auth/login":
         url, flow = auth.login_redirect(settings)
         return response(b"", 302, "text/plain", [auth.set_cookie(auth.FLOW_COOKIE, flow, auth.FLOW_SECONDS)], url)
@@ -93,6 +96,26 @@ def handle(environ, method, raw_path, headers, read_body):
     raw = read_body(size) if 0 < size <= body_limit(path) else b""
     content_type = headers.content_type()
     return with_pipeline(environ, user, lambda pipeline, config: post_route(pipeline, path, raw, content_type))
+
+
+def team_login(settings, method, headers, read_body):
+    if method != "POST":
+        return response(auth.login_page(), 200, HTML)
+    # A form post from this site only; a slow wrong answer keeps password guessing slow.
+    if headers.get("Origin") not in (settings.app_origin, None) or headers.get("Sec-Fetch-Site") == "cross-site":
+        return response({"error": "Sign in from the workspace page"}, 403)
+    try:
+        size = int(headers.get("Content-Length") or 0)
+    except ValueError:
+        size = 0
+    form = {k: v[0] for k, v in parse_qs((read_body(size) if 0 < size <= 4000 else b"").decode("utf-8", "replace")).items()}
+    try:
+        user = auth.check_team_login(settings, form.get("name"), form.get("password"))
+    except ValueError as exc:
+        time.sleep(1)
+        return response(auth.login_page(str(exc), form.get("name", "")), 401, HTML)
+    session = auth.set_cookie(auth.SESSION_COOKIE, auth.session_value(settings, user), auth.SESSION_SECONDS)
+    return response(b"", 302, "text/plain", [session], "/")
 
 
 def get_route(settings, cookie, pipeline, config, path, query, user):

@@ -8,6 +8,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import parse_qs
+import urllib.parse as urllib_parse
 from zipfile import ZipFile
 
 from substack_outreach.common import FITS, canonical, classify, dumps, html_email, is_profile, now, publication_url
@@ -1248,6 +1249,27 @@ class HostedTests(unittest.TestCase):
         p = Pipeline(load_hosted_config(self.env))
         self.assertEqual(p.store.db.execute("SELECT actor FROM events WHERE kind='approval_invalidated'").fetchone()[0], 'reviewer@example.com')
         p.store.close()
+
+    def test_team_password_sign_in(self):
+        env = {k: v for k, v in self.env.items() if not k.startswith('GOOGLE_')} | {'TEAM_PASSWORD': 'correct horse battery'}
+        self.env = env
+        status, _, body = self.request('GET', '/api/auth/login')
+        self.assertEqual(status, 200)
+        self.assertIn(b'name="password"', body)
+        form = lambda name, pw: urllib_parse.urlencode({'name': name, 'password': pw}).encode()
+        post = {'Content-Type': 'application/x-www-form-urlencoded', 'Origin': 'https://outreach.example.test'}
+        with patch('time.sleep'):
+            status, _, body = self.request('POST', '/api/auth/login', post, form('Margulan', 'wrong password'))
+        self.assertEqual(status, 401)
+        self.assertIn(b'not right', body)
+        self.assertEqual(self.request('POST', '/api/auth/login', post | {'Origin': 'https://evil.example'}, form('Margulan', 'correct horse battery'))[0], 403)
+        status, headers, _ = self.request('POST', '/api/auth/login', post, form('  Margulan  ', 'correct horse battery'))
+        self.assertEqual((status, dict(headers)['Location']), (302, '/'))
+        session = next(v for k, v in headers if k == 'Set-Cookie' and v.startswith('ss_session=')).split(';')[0]
+        status, _, body = self.request('GET', '/api/substack/bootstrap', {'Cookie': session})
+        self.assertEqual((status, json.loads(body)['user']), (200, {'email': 'Margulan'}))
+        with self.assertRaisesRegex(ValueError, 'at least 12'):
+            self.auth.AuthSettings.from_env(env | {'TEAM_PASSWORD': 'short'})
 
     def test_claims_cookies_and_settings_are_checked(self):
         auth, s = self.auth, self.settings
