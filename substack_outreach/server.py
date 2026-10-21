@@ -35,10 +35,10 @@ def api_get(pipeline, config, path, query):
             return 200, {"statuses": STATUSES, "fits": FITS, "asks": ASKS, "provider": config["provider"],
                          "sender": config["sender"], "facts": facts, "network_enabled": config["network_enabled"],
                          "batch_size": config["batch_size"], "collect_contacts": config["collect_contacts"],
-                         "contact_channels": CONTACT_CHANNELS}, JSON
+                         "contact_channels": CONTACT_CHANNELS, "channels": pipeline.channel_counts()}, JSON
         if path == "/api/substack/queue":
             return 200, pipeline.queue(query.get("scope", "pilot"), query.get("search", ""), query.get("status", ""),
-                                       int(query.get("limit", 100)), int(query.get("offset", 0))), JSON
+                                       int(query.get("limit", 100)), int(query.get("offset", 0)), query.get("channel", "substack")), JSON
         if path == "/api/substack/metrics":
             return 200, pipeline.store.metrics(), JSON
         if path == "/api/substack/export":
@@ -47,9 +47,12 @@ def api_get(pipeline, config, path, query):
                 raise ValueError("The worker exports csv or json; build the send sheet with the CLI")
             if scope not in ("pilot", "shortlisted", "all"):
                 raise ValueError("Export scope must be pilot, shortlisted or all")
-            rows = pipeline.export_rows(scope)
+            channel = query.get("channel") or None
+            if channel and channel not in ("substack", "medium", "discord"):
+                raise ValueError("Export channel must be substack, medium or discord")
+            rows = pipeline.export_rows(scope, channel)
             # A real file download: works as a plain link and tells the page what it contains.
-            headers = {"Content-Disposition": f'attachment; filename="substack-{scope}-{now()[:10]}.{fmt}"',
+            headers = {"Content-Disposition": f'attachment; filename="{channel or ('substack' if scope in ('pilot', 'shortlisted') else 'all')}-{scope}-{now()[:10]}.{fmt}"',
                        "X-Export-Rows": str(len(rows)), "X-Export-Drafts": str(sum(1 for r in rows if r["email_body"]))}
             return 200, render_export(rows, fmt), "text/csv; charset=utf-8" if fmt == "csv" else JSON, headers
         if path.startswith("/api/substack/publication/"):

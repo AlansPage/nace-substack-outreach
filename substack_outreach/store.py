@@ -10,6 +10,29 @@ from .db import connect
 from .workbook import EXPECTED, identifier, read_workbook
 
 DNC_MATCHERS = ("hosts", "author_names", "names", "pub_ids")
+# Outreach channels besides Substack, recognised by the column holding each row's link.
+CHANNEL_COLUMNS = {"medium": "medium_url", "discord": "invite_url"}
+CHANNELS = ["substack", "medium", "discord"]
+CHANNEL_SQL = "coalesce(json_extract(data,'$.channel'),'substack')"
+
+
+def channel_for(headers):
+    """Which outreach channel a table holds, from its columns; None when it is none of them."""
+    columns = set(headers)
+    for channel, column in CHANNEL_COLUMNS.items():
+        if column in columns:
+            return channel
+    return "substack" if {"url", "pub_id"} & columns else None
+
+
+def channel_record(channel, src):
+    """Medium and Discord rows in the publication shape: (name, link, person, text for triage)."""
+    if channel == "medium":
+        name = src.get("name") or ""
+        return name, canonical(src.get("medium_url")), name, {"name": name}
+    name = src.get("name") or ""
+    return name, canonical(src.get("invite_url")), src.get("company") or "", {
+        "name": name, "description": src.get("description"), "categories": src.get("category")}
 
 
 def load_dnc(path):
@@ -128,7 +151,7 @@ class Store:
         headers, rows = read_workbook(path)
         return self.import_rows(headers, rows, fingerprint, str(path))
 
-    def import_rows(self, headers, rows, fingerprint, label):
+    def import_rows(self, headers, rows, fingerprint, label, channel="substack"):
         """Workbook or uploaded rows -> publications. Existing records, history and marks are never replaced."""
         previous = self.db.execute("SELECT * FROM imports WHERE fingerprint=?", (fingerprint,)).fetchone()
         if previous:
@@ -136,10 +159,16 @@ class Store:
         inserted, duplicates = 0, 0
         with self.db:
             for rowno, src in rows:
-                url = publication_url(src.get("url"))
-                profile = canonical(src.get("substack_profile")) or (canonical(src.get("url")) if is_profile(src.get("url")) else "")
-                pub_id, author_id = identifier(src.get("pub_id")), identifier(src.get("author_id"))
-                keys = (["pub:" + pub_id] if pub_id else []) + (["url:" + url] if url else [])
+                if channel == "substack":
+                    url = publication_url(src.get("url"))
+                    profile = canonical(src.get("substack_profile")) or (canonical(src.get("url")) if is_profile(src.get("url")) else "")
+                    pub_id, author_id = identifier(src.get("pub_id")), identifier(src.get("author_id"))
+                    keys = (["pub:" + pub_id] if pub_id else []) + (["url:" + url] if url else [])
+                    name, person, triage = src.get("name"), src.get("author_name"), src
+                else:
+                    name, url, person, triage = channel_record(channel, src)
+                    profile, pub_id, author_id = "", "", ""
+                    keys = [channel + ":" + url] if url else []
                 keys = keys or [f"row:{fingerprint}:{rowno}"]
                 found = {r[0] for key in keys for r in self.db.execute("SELECT publication_id FROM aliases WHERE key=?", (key,))}
                 if len(found) > 1:
@@ -153,10 +182,13 @@ class Store:
                     pid = found.pop()
                     duplicates += 1
                 else:
-                    fit, score, reasons = classify(src)
-                    author_key = "author:" + author_id if author_id else ("profile:" + profile if profile else "unknown:" + digest(keys))
-                    data = {"source": src, "publication": src.get("name"), "publication_url": url,
-                            "profile_url": profile, "author_name": src.get("author_name"),
+                    fit, score, reasons = classify(triage)
+                    if channel != "substack":
+                        author_key = channel + ":" + (url or digest(keys))
+                    else:
+                        author_key = "author:" + author_id if author_id else ("profile:" + profile if profile else "unknown:" + digest(keys))
+                    data = {"source": src, "channel": channel, "publication": name, "publication_url": url,
+                            "profile_url": profile, "author_name": person,
                             "fit_category": fit, "fit_reasons": reasons, "owner": "", "name_source": "",
                             "confirmed_first_name": "", "contact_route": "", "contact_source_url": "",
                             "contact_kind": "", "contact_confirmed": False, "research": {}, "evidence": None,
@@ -194,7 +226,7 @@ class Store:
         # A persisted pilot is resumable. Increasing the batch extends it; it never rotates silently.
         with self.db:
             current = self.db.execute("SELECT count(*) FROM publications WHERE shortlisted=1").fetchone()[0]
-            candidates = self.db.execute("SELECT id FROM publications WHERE shortlisted=0 AND score>0 AND status='Imported' ORDER BY score DESC,id LIMIT ?", (max(0, limit-current),)).fetchall()
+            candidates = self.db.execute(f"SELECT id FROM publications WHERE shortlisted=0 AND score>0 AND status='Imported' AND {CHANNEL_SQL}='substack' ORDER BY score DESC,id LIMIT ?", (max(0, limit-current),)).fetchall()
             for r in candidates:
                 self.db.execute("UPDATE publications SET shortlisted=1,status='Shortlisted' WHERE id=?", (r[0],))
             pilot = self.db.execute("SELECT count(*) FROM publications WHERE pilot=1").fetchone()[0]
