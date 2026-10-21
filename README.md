@@ -15,10 +15,13 @@ your machine.
 | Worker: import, shortlist, evidence, drafting, approval, export | `substack_outreach/*.py` |
 | Review UI (browser) | `substack_outreach/ui.js`, `ui.css`, hosted by `index.template.html` |
 | Facts registry (placeholder) | `substack_outreach/facts.example.json` |
-| Tests | `tests/test_substack.py`, `tests/substack-ui.test.mjs` |
+| Do-not-contact seed list | `substack_outreach/dnc.example.json` (copy to gitignored `dnc.json`) |
+| Gmail reply-to export (runs in Google Apps Script) | `scripts/gmail_replyto.gs` |
+| Tests and saved fixtures | `tests/test_substack.py`, `tests/*.test.mjs`, `tests/fixtures/` |
 | Full workflow guide | [`docs/SUBSTACK_OUTREACH.md`](docs/SUBSTACK_OUTREACH.md) |
 
-Python 3.12+ standard library only — no pip packages, no SDK, no API key needed to run locally.
+Python 3.12+ standard library only — no pip packages, no SDK, no API key needed to run locally
+(the optional `local` writer talks to a model server on your own machine).
 Node 18+ is only needed for the JavaScript tests.
 
 ## Setup
@@ -34,17 +37,39 @@ Then open <http://127.0.0.1:8765/>. The server binds to loopback only, requires 
 token for every mutation, and serves nothing but the built page. Stop it with Ctrl+C.
 
 Create `substack.config.json` by copying `substack_outreach/config.example.json` and setting your
-sender identity, `input_path` and `registry_path`. It is gitignored.
+sender identity, `input_path` and `registry_path`. It is gitignored. Copy
+`substack_outreach/dnc.example.json` to `substack_outreach/dnc.json` (also gitignored) to keep your own
+do-not-contact list.
 
 ## Common commands
 
-```bash
-python -m substack_outreach --config substack.config.json pilot            # import + shortlist + draft
-python -m substack_outreach --config substack.config.json process --batch 20
-python -m substack_outreach --config substack.config.json research-import articles.json
-python -m substack_outreach --config substack.config.json export --format csv --scope pilot --out out.csv
-python -m substack_outreach --config substack.config.json metrics
+In PowerShell, from the repository folder:
+
+```powershell
+py -3.12 -m substack_outreach --config .\substack.config.json pilot                     # import + DNC list + shortlist + draft
+py -3.12 -m substack_outreach --config .\substack.config.json process --batch 20
+py -3.12 -m substack_outreach --config .\substack.config.json research-import .\.local\articles.json
+py -3.12 -m substack_outreach --config .\substack.config.json collect-contacts --batch 20  # about-page proposals (needs collect_contacts + network_enabled)
+py -3.12 -m substack_outreach --config .\substack.config.json contacts-import .\.local\substack-replyto.json   # Gmail reply-to export
+py -3.12 -m substack_outreach --config .\substack.config.json export --format csv --scope pilot --out .\.local\pilot.csv
+py -3.12 -m substack_outreach --config .\substack.config.json export --format sendsheet --out .\.local\sendsheet.html   # approved drafts only
+py -3.12 -m substack_outreach --config .\substack.config.json metrics
 ```
+
+Contact proposals and imported reply-to routes are never confirmed automatically: a named person confirms
+each one in the UI before approval is possible. The send sheet only fills your mail client; it sends nothing.
+
+## Configuration keys added since the first release
+
+| Key | Default | What it does |
+|---|---|---|
+| `dnc_path` | `substack_outreach/dnc.json` | Do-not-contact list applied at every import; falls back to the committed seed |
+| `default_feed_permission` | `null` | Team policy decision: research permission for workbook Substack rows without their own `research` block |
+| `collect_contacts` | `false` | Allows `collect-contacts` to read `{publication_url}/about` pages (also needs `network_enabled`) |
+| `provider` | `mock` | `mock`, `openai` or `local` |
+| `local_base_url` | `http://127.0.0.1:11434` | Loopback-only OpenAI-compatible endpoint for `provider: "local"` (for example Ollama) |
+
+See [`docs/SUBSTACK_OUTREACH.md`](docs/SUBSTACK_OUTREACH.md) for each one.
 
 ## The facts registry
 
@@ -59,8 +84,8 @@ confirmed; unapproved or expired entries block approval by design.
 
 ## What is deliberately not in this repository
 
-The source workbook (`*.xlsx`), the SQLite database, exports, drafts and the real facts registry
-are all gitignored. They contain publication contact data and unreleased product information.
+The source workbook (`*.xlsx`), the SQLite database, exports (including the send sheet), drafts, the
+real facts registry and your `dnc.json` are all gitignored. They contain publication contact data and unreleased product information.
 Check `.gitignore` before adding files, and keep contact data out of commits.
 
 ## Tests

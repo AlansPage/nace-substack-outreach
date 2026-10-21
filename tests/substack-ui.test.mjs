@@ -36,3 +36,15 @@ test('standalone shell hosts the Substack panel and inlines its source', () => {
   assert.ok(html.includes("detail: 'substack'"));
 });
 
+
+test('about-page proposal shows confirm controls only while unresolved and escapes routes', () => {
+  const proposal = { status: 'proposed', contact_source_url: 'https://testing.example/about', collected_at: 'now',
+    candidates: [{ route: '"><img src=x onerror=alert(1)>', type: 'email', found_as: 'visible text' }] };
+  const html = C.proposalHTML(proposal);
+  assert.ok(html.includes('CONTACT_PROPOSED_UNCONFIRMED'));
+  assert.ok(html.includes('data-action="confirm-contact"') && html.includes('data-action="dismiss-contact"'));
+  assert.ok(!html.includes('<img'));
+  const done = C.proposalHTML({ ...proposal, status: 'confirmed', decided_by: 'Human' });
+  assert.ok(!done.includes('confirm-contact') && done.includes('confirmed by Human'));
+  assert.equal(C.proposalHTML(undefined), '');
+});

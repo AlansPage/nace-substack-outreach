@@ -1,0 +1,20 @@
+[
+  {"publication_url": "https://www.alpha.example/", "sender_name": "Alpha Writer", "reply_to": "reply@alpha.example",
+   "message_url": "https://mail.google.com/mail/u/0/#all/t-alpha"},
+  {"publication_url": "https://beta.example/archive", "sender_name": "Beta Writer", "reply_to": "beta@beta.example",
+   "message_url": "https://mail.google.com/mail/u/0/#all/t-beta"},
+  {"publication_url": "https://www.alpha.example", "sender_name": "Alpha Writer", "reply_to": "second@alpha.example",
+   "message_url": "https://mail.google.com/mail/u/0/#all/t-alpha-2"},
+  {"publication_url": "https://unknown.example", "sender_name": "Nobody", "reply_to": "n@unknown.example",
+   "message_url": "https://mail.google.com/mail/u/0/#all/t-unknown"},
+  {"publication_url": "https://substack.com/@someone", "sender_name": "Platform", "reply_to": "p@substack.com",
+   "message_url": "https://mail.google.com/mail/u/0/#all/t-platform"},
+  {"publication_url": "https://testing.example", "sender_name": "Sam Example", "reply_to": "reply@testing.example",
+   "message_url": "https://mail.google.com/mail/u/0/#all/t-testing"},
+  {"publication_url": "https://gamma.example", "sender_name": "Gamma", "reply_to": "not an address",
+   "message_url": "https://mail.google.com/mail/u/0/#all/t-gamma"},
+  {"publication_url": "https://gamma.example", "sender_name": "Gamma", "reply_to": "",
+   "message_url": "https://mail.google.com/mail/u/0/#all/t-gamma-2"},
+  {"publication_url": "https://gamma.example", "sender_name": "Gamma", "reply_to": "g@gamma.example",
+   "message_url": "https://evil.example/#all/t-gamma-3"}
+]

@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import csv
+import html
 import io
 import json
+from pathlib import Path
+from urllib.parse import quote, urlsplit
+
 from .common import FITS, digest, dumps, html_email, now, publication_url, safe_url
+from .config import ROOT
 from .evidence import evidence_checks, prepare_evidence, registry, validate
-from .models import MockWriter, OpenAIWriter, writing_input
+from .models import LocalWriter, MockWriter, OpenAIWriter, writing_input
 from .sources import Collector, Run, save_articles
-from .store import Store
+from .store import Store, load_dnc
 from .workbook import find_workbook
 
 
@@ -54,9 +59,22 @@ class Pipeline:
             items.append({k: p.get(k) for k in ("id", "publication", "author_name", "status", "fit_category", "fit_reasons", "owner", "score", "publication_url", "profile_url", "author_publications", "do_not_contact", "source_kind")})
         return {"items": items, "total": total, "offset": offset}
 
-    def pilot(self, input_path=None, batch=None, shortlist=None):
+    def dnc_list(self):
+        path = Path(self.config["dnc_path"])
+        if not path.is_file():
+            path = ROOT / "substack_outreach/dnc.example.json"
+        return load_dnc(path), path.name
+
+    def import_workbook(self, input_path=None, batch=None, shortlist=None):
         result = self.store.import_workbook(find_workbook(input_path or self.config.get("input_path")))
+        entries, name = self.dnc_list()
+        result["dnc_list"] = name
+        result["dnc_suppressed"] = self.store.apply_dnc(entries, name)
         result.update(self.store.shortlist(shortlist or self.config["shortlist_size"], batch or self.config["batch_size"]))
+        return result
+
+    def pilot(self, input_path=None, batch=None, shortlist=None):
+        result = self.import_workbook(input_path, batch, shortlist)
         result["processing"] = self.process(batch or self.config["batch_size"])
         return result
 
@@ -106,6 +124,125 @@ class Pipeline:
             raise
         return results
 
+    def collect_contacts(self, batch=None, retry_failed=False):
+        if not self.config.get("collect_contacts"):
+            raise ValueError("CONTACT_COLLECTION_DISABLED: set collect_contacts: true in the local config")
+        if not self.config["network_enabled"]:
+            raise ValueError("NETWORK_DISABLED: enable network access to read publication about pages")
+        run = Run(self.store, self.config, "contacts")
+        collector = Collector(self.store, self.config, run)
+        results = []
+        try:
+            rows = self.store.db.execute("SELECT id,data FROM publications WHERE pilot=1 AND status NOT IN ('Skipped','Do not contact','Sent','Replied') ORDER BY score DESC,id").fetchall()
+            for row in rows:
+                if len(results) >= (batch or self.config["batch_size"]):
+                    break
+                data = json.loads(row["data"])
+                previous = (data.get("contact_route_proposed") or {}).get("status")
+                if not publication_url(data.get("publication_url")) or data.get("contact_confirmed") or (previous and not (retry_failed and previous == "failed")):
+                    continue
+                pub = self.store.get(row["id"])
+                try:
+                    about, candidates = collector.about_contacts(pub)
+                except ValueError as exc:
+                    if str(exc).startswith("Per-run"):
+                        results.append({"id": pub["id"], "publication": pub["publication"], "error": str(exc)})
+                        break
+                    # Robots refusals, HTTP barriers and oversize pages are remembered; --retry-failed tries again.
+                    pub["contact_route_proposed"] = {"route": "", "candidates": [], "contact_source_url": pub["publication_url"] + "/about",
+                                                     "contact_confirmed": False, "status": "failed", "error": str(exc), "collected_at": now()}
+                    with self.store.db:
+                        self.store.save(pub)
+                        self.store.event(pub["id"], "contact_collection_failed", str(exc))
+                    results.append({"id": pub["id"], "publication": pub["publication"], "error": str(exc)})
+                    continue
+                # A proposal only. contact_route is written solely by a human confirming it in the UI.
+                pub["contact_route_proposed"] = {"route": candidates[0]["route"] if candidates else "", "candidates": candidates,
+                                                 "contact_source_url": about, "contact_confirmed": False,
+                                                 "status": "proposed" if candidates else "none_found", "collected_at": now()}
+                with self.store.db:
+                    self.store.save(pub)
+                    self.store.event(pub["id"], "contact_proposed", {"source": about, "candidates": len(candidates)})
+                results.append({"id": pub["id"], "publication": pub["publication"], "source": about,
+                                "result": pub["contact_route_proposed"]["status"], "candidates": candidates})
+            run.finish()
+        except Exception:
+            run.finish("Run interrupted; committed work is resumable")
+            raise
+        return results
+
+    def resolve_contact_proposal(self, pid, data):
+        pub = self.store.get(pid)
+        proposal = pub.get("contact_route_proposed") or {}
+        if proposal.get("status") != "proposed":
+            raise ValueError("No unresolved contact proposal for this publication")
+        if not str(data.get("reviewer") or "").strip():
+            raise ValueError("A named reviewer is required to resolve a contact proposal")
+        decision = data.get("decision")
+        if decision == "confirm":
+            route = data.get("route") or proposal["route"]
+            if route not in [c["route"] for c in proposal["candidates"]]:
+                raise ValueError("Confirm one of the proposed routes; enter any other route manually with its own source")
+            # Reuse the ordinary recipient validation; the about page is the provenance.
+            self.update(pid, {"contact_route": route, "contact_source_url": proposal["contact_source_url"],
+                              "contact_kind": data.get("contact_kind") or "contact", "contact_confirmed": True})
+            pub = self.store.get(pid)
+        elif decision != "dismiss":
+            raise ValueError("decision must be confirm or dismiss")
+        pub["contact_route_proposed"] = dict(proposal, status="confirmed" if decision == "confirm" else "dismissed",
+                                             contact_confirmed=decision == "confirm", decided_by=data["reviewer"].strip(), decided_at=now())
+        with self.store.db:
+            self.store.save(pub)
+            self.store.event(pid, "contact_proposal_" + ("confirmed" if decision == "confirm" else "dismissed"), {"reviewer": data["reviewer"].strip()})
+        return self.detail(pid)
+
+    def match_publication(self, url):
+        """Publication id for an exported newsletter URL: canonical publication_url, then host."""
+        target = publication_url(url)
+        if not target:
+            return None, "no_publication_url"
+        exact = self.store.db.execute("SELECT id FROM publications WHERE json_extract(data,'$.publication_url')=?", (target,)).fetchall()
+        if len(exact) == 1:
+            return exact[0][0], "publication_url"
+        host = urlsplit(target).hostname
+        same_host = [r[0] for r in self.store.db.execute("SELECT id,json_extract(data,'$.publication_url') FROM publications")
+                     if r[1] and (urlsplit(r[1]).hostname or "").removeprefix("www.") == host]
+        if len(exact) > 1 or len(same_host) > 1:
+            return None, "ambiguous"
+        return (same_host[0], "host") if same_host else (None, "no_match")
+
+    def import_reply_to(self, records):
+        """Gmail reply-to export -> unconfirmed contact routes. Unmatched records go to the report only."""
+        if not isinstance(records, list):
+            raise ValueError("Reply-to import expects a JSON array")
+        report = {"imported": [], "unmatched": [], "skipped": [], "invalid": []}
+        seen = set()
+        for n, r in enumerate(records):
+            item = {"index": n, **{k: (r.get(k) if isinstance(r, dict) else None) for k in ("publication_url", "sender_name", "reply_to", "message_url")}}
+            if not isinstance(r, dict) or not item["reply_to"] or not str(item["message_url"] or "").startswith("https://mail.google.com/"):
+                report["invalid"].append(item | {"reason": "reply_to and a Gmail message_url are required"})
+                continue
+            pid, how = self.match_publication(item["publication_url"])
+            if pid is None:
+                report["unmatched"].append(item | {"reason": how})
+                continue
+            pub = self.store.get(pid)
+            if pid in seen or pub.get("contact_route"):
+                # Never replace a route already recorded (or imported earlier in this file).
+                report["skipped"].append(item | {"publication_id": pid, "reason": "publication already has a contact route"})
+                continue
+            try:
+                self.update(pid, {"contact_route": str(item["reply_to"]).strip(), "contact_source_url": item["message_url"],
+                                  "contact_kind": "reply_to", "contact_confirmed": False})
+            except ValueError as exc:
+                report["invalid"].append(item | {"publication_id": pid, "reason": str(exc)})
+                continue
+            seen.add(pid)
+            self.store.event(pid, "reply_to_imported", {"source": item["message_url"], "matched_by": how})
+            self.store.db.commit()
+            report["imported"].append(item | {"publication_id": pid, "publication": pub["publication"], "matched_by": how})
+        return report
+
     def save_draft(self, pub, draft, facts, h):
         draft["html_body"] = html_email(draft["plain_text_body"])
         draft["registry_hash"] = h
@@ -142,7 +279,8 @@ class Pipeline:
         own_run = run is None
         run = run or Run(self.store, self.config, "regenerate" if regenerate else "generate")
         try:
-            writer = MockWriter() if self.config["provider"] == "mock" else OpenAIWriter(self.store, self.config, run)
+            provider = self.config["provider"]
+            writer = MockWriter(facts) if provider == "mock" else LocalWriter(self.store, self.config, run) if provider == "local" else OpenAIWriter(self.store, self.config, run)
             payload = writing_input(pub, evidence, facts, self.config["sender"])
             if writer.name != "mock" and not evidence.get("evidence_reviewed_by"):
                 raise ValueError("Review the evidence-backed angle before live writing")
@@ -236,6 +374,8 @@ class Pipeline:
             return self.detail(pid)
         if action == "evidence":
             return self.update(pid, {"evidence": data})
+        if action == "contact_proposal":
+            return self.resolve_contact_proposal(pid, data)
         pub = self.detail(pid)
         with self.store.db:
             if action in ("approve", "review"):
@@ -277,7 +417,23 @@ class Pipeline:
             self.store.save(pub)
         return self.detail(pid)
 
+    def sendsheet(self, scope="pilot"):
+        rows = []
+        clause = " AND pilot=1" if scope == "pilot" else " AND shortlisted=1" if scope == "shortlisted" else ""
+        for r in self.store.db.execute("SELECT id FROM publications WHERE status='Approved'" + clause + " ORDER BY score DESC,id").fetchall():
+            # detail() re-validates and withdraws an approval that no longer holds.
+            p = self.detail(r[0])
+            d = p.get("draft") or {}
+            if p["status"] != "Approved" or not d.get("approved_hash") or d["approved_hash"] != d["hash"]:
+                continue
+            rows.append({"publication": p["publication"], "recipient": p["contact_route"], "contact_source": p["contact_source_url"],
+                         "subject": d["subject"], "body": d["plain_text_body"], "approved_by": d["approved_by"],
+                         "approved_at": d["approved_at"], "version": d["version"], "hash": d["hash"]})
+        return sendsheet_html(rows, now())
+
     def export(self, fmt="json", scope="pilot"):
+        if fmt == "sendsheet":
+            return self.sendsheet(scope)
         rows = []
         clause = " WHERE pilot=1" if scope == "pilot" else " WHERE shortlisted=1" if scope == "shortlisted" else ""
         for r in self.store.db.execute("SELECT id FROM publications" + clause + " ORDER BY score DESC,id").fetchall():
@@ -291,7 +447,7 @@ class Pipeline:
         if fmt == "json":
             return json.dumps(rows, ensure_ascii=False, indent=2)
         if fmt != "csv":
-            raise ValueError("Export format must be csv or json")
+            raise ValueError("Export format must be csv, json or sendsheet")
         fields = ["publication", "author", "publication_url", "article_url", "supporting_excerpt", "angle", "contact", "contact_source", "subject", "email_body", "owner", "status", "review_flags"]
         output = io.StringIO(newline="")
         writer = csv.DictWriter(output, fieldnames=fields)
@@ -299,6 +455,50 @@ class Pipeline:
         for row in rows:
             writer.writerow({k: csv_safe(dumps(v) if isinstance(v, list) else v) for k, v in row.items()})
         return output.getvalue()
+
+
+def mailto_link(to, subject, body):
+    # RFC 6068: percent-encode everything, CRLF line breaks. Opening it only fills a compose window.
+    crlf = lambda text: text.replace("\r\n", "\n").replace("\n", "\r\n")
+    return "mailto:" + quote(to, safe="@") + "?subject=" + quote(crlf(subject), safe="") + "&body=" + quote(crlf(body), safe="")
+
+
+SENDSHEET_STYLE = ("*{box-sizing:border-box}body{font:15px/1.6 system-ui,sans-serif;max-width:860px;margin:40px auto;padding:0 20px;color:#1d3029}"
+                   "header p{color:#5d6d64}article{border-top:1px solid #cbd7d0;padding:22px 0}h2{font-size:19px;margin:0 0 6px}"
+                   ".meta{font-size:12px;color:#5d6d64}dt{font-weight:600;font-size:12px;margin-top:12px}dd{margin:4px 0}"
+                   "textarea{width:100%;min-height:230px;font:14px/1.6 ui-monospace,monospace;padding:10px}"
+                   "button,.mailto{font:inherit;font-size:13px;margin:6px 8px 0 0;padding:7px 12px;border:1px solid #9fb4a9;"
+                   "border-radius:6px;background:#fff;color:#183b31;text-decoration:none;display:inline-block;cursor:pointer}"
+                   ".note{background:#fff6e4;color:#7a5418;padding:10px;font-size:13px}")
+SENDSHEET_SCRIPT = ("document.addEventListener('click',function(e){var b=e.target.closest('button[data-copy]');if(!b)return;"
+                    "var t=document.getElementById(b.dataset.copy);var done=function(){b.textContent='Copied';"
+                    "setTimeout(function(){b.textContent=b.dataset.label},1500)};"
+                    "if(navigator.clipboard&&window.isSecureContext){navigator.clipboard.writeText(t.value).then(done,function(){t.select();document.execCommand('copy');done()})}"
+                    "else{t.select();document.execCommand('copy');done()}});")
+
+
+def sendsheet_html(rows, generated_at):
+    esc = lambda value: html.escape(str(value or ""), quote=True)
+    out = ['<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">'
+           '<meta name="robots" content="noindex, nofollow"><title>Approved drafts - manual send sheet</title><style>' + SENDSHEET_STYLE + '</style></head><body>'
+           '<header><h1>Approved drafts</h1><p>Generated ' + esc(generated_at) + ' · ' + str(len(rows)) + ' approved publication(s).</p>'
+           '<p class="note">Nothing is sent from this page. Copy or open each draft in your own mail client, send it yourself, '
+           'then use <strong>Record sent manually</strong> in the workspace. This file holds contact data: keep it out of public/ and out of git.</p></header>']
+    for n, r in enumerate(rows):
+        to, subject, body = r["recipient"], r["subject"], r["body"]
+        is_email = "@" in to and not to.lower().startswith(("http://", "https://"))
+        route = to.removeprefix("mailto:")
+        compose = ('<a class="mailto" href="' + esc(mailto_link(route, subject, body)) + '">Open in mail app</a>') if is_email else \
+                  ('<a class="mailto" href="' + esc(safe_url(to)) + '" rel="noopener noreferrer">Open contact route</a>' if safe_url(to) else "")
+        out.append('<article><h2>' + esc(r["publication"]) + '</h2><p class="meta">Approved by ' + esc(r["approved_by"]) + ' at ' + esc(r["approved_at"])
+                   + ' · version ' + esc(r["version"]) + ' · ' + esc(r["hash"][:16]) + ' · contact source: ' + esc(r["contact_source"]) + '</p><dl>'
+                   + ''.join('<dt>' + label + '</dt><dd><textarea id="' + key + str(n) + '" readonly' + (' rows="1" style="min-height:0"' if key != "body" else "") + '>' + esc(value) + '</textarea>'
+                             + '<button type="button" data-copy="' + key + str(n) + '" data-label="Copy ' + label.lower() + '">Copy ' + label.lower() + '</button></dd>'
+                             for key, label, value in (("to", "Recipient", route), ("subject", "Subject", subject), ("body", "Body", body)))
+                   + '</dl>' + compose + '</article>')
+    if not rows:
+        out.append('<p>No publication is currently approved. Approve drafts in the workspace first.</p>')
+    return "".join(out) + "<script>" + SENDSHEET_SCRIPT + "</script></body></html>"
 
 
 def csv_safe(value):

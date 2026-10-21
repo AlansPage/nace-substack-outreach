@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "entries": [
+    {"owner": "VendorCo", "hosts": ["vendorco-news.substack.com"], "author_names": ["VendorCo Official"],
+     "reason": "Vendor-owned publication", "source": "Test fixture"},
+    {"owner": "OtherLab", "pub_ids": ["77"], "reason": "Vendor-owned publication", "source": "Test fixture"}
+  ]
+}

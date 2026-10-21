@@ -1,0 +1,12 @@
+{
+  "subject": "Q&A? <b>agents</b> & \"scoring\"",
+  "mailto": {
+    "to": "editor+news@testing.example",
+    "subject": "Q&A? <b>agents</b>",
+    "body": "Hi Sam,\n\nLine two & more = yes?\n\nBest,\nYour Name",
+    "expected": "mailto:editor%2Bnews@testing.example?subject=Q%26A%3F%20%3Cb%3Eagents%3C%2Fb%3E&body=Hi%20Sam%2C%0D%0A%0D%0ALine%20two%20%26%20more%20%3D%20yes%3F%0D%0A%0D%0ABest%2C%0D%0AYour%20Name"
+  },
+  "url_route_row": {"publication": "Form only", "recipient": "https://forms.example/submit", "contact_source": "https://forms.example/about",
+                    "subject": "Hello", "body": "Body", "approved_by": "Human", "approved_at": "2026-10-20T00:00:00+00:00",
+                    "version": 3, "hash": "abcdef0123456789abcdef"}
+}

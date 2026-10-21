@@ -9,7 +9,21 @@
     const u = s.startsWith('http') ? s.replace(/[.,;)]+$/, '') : '';
     return safeURL(u) ? link(u, u) + esc(s.slice(u.length)) : esc(s);
   }).join('').replace(/\n/g, '<br>');
-  globalThis.SubstackUIHelpers = { esc, safeURL, link, wordCount, lengthLabel, previewHTML };
+  // An about-page proposal stays separate from the contact route until a named human confirms it.
+  const proposalHTML = proposal => {
+    if (!proposal) return '';
+    const source = link(proposal.contact_source_url, 'about page');
+    if (proposal.status === 'none_found') return `<p class="ss-note">No contact found on the ${source} (${esc(proposal.collected_at)}).</p>`;
+    if (proposal.status === 'failed') return `<p class="ss-note">About page not read: ${esc(proposal.error)}. Retry with collect-contacts --retry-failed.</p>`;
+    if (proposal.status !== 'proposed') return `<p class="ss-note">About-page proposal ${esc(proposal.status)} by ${esc(proposal.decided_by)} · ${source}</p>`;
+    const options = proposal.candidates.map(c => `<option value="${esc(c.route)}">${esc(c.route)} · ${esc(c.type)} · ${esc(c.found_as)}</option>`).join('');
+    return `<div class="ss-proposal"><p class="ss-warning">CONTACT_PROPOSED_UNCONFIRMED · found on the ${source}. Blocks approval until confirmed or dismissed.</p>`
+      + `<div class="ss-form-grid"><label class="ss-field">Proposed route<select id="ss-proposal-route">${options}</select></label>`
+      + `<label class="ss-field">Route type<select id="ss-proposal-kind">${['contact', 'business', 'submission', 'sponsorship'].map(k => `<option>${k}</option>`).join('')}</select></label>`
+      + `<label class="ss-field">Confirmed by<input id="ss-proposal-reviewer"></label></div>`
+      + `<p><button data-action="confirm-contact">Confirm proposed contact</button> <button data-action="dismiss-contact">Dismiss proposal</button></p></div>`;
+  };
+  globalThis.SubstackUIHelpers = { esc, safeURL, link, wordCount, lengthLabel, previewHTML, proposalHTML };
   if (typeof document === 'undefined') return;
   const root = document.getElementById('tab-substack');
   if (!root) return;
@@ -31,7 +45,7 @@
     root.innerHTML = `<header class="ss-hero"><div><p class="ss-eyebrow">NACE AI · LOCAL RESEARCH WORKSPACE</p><h1>Substack outreach</h1><p>Evidence first. A short, personal invitation. A human decision.</p></div><span class="ss-chip">Manual sending only</span></header>
       <div id="ss-message" class="ss-message" role="status" aria-live="polite">Connecting to local worker…</div>
       <div id="ss-stats" class="ss-stats"></div>
-      <div class="ss-toolbar"><label>Queue <select id="ss-scope"><option value="pilot">20-publication pilot</option><option value="shortlisted">Shortlist</option><option value="all">All imported + fixture</option></select></label><label>Status <select id="ss-status"><option value="">All statuses</option></select></label><label class="ss-search">Search <input id="ss-search" type="search" placeholder="Publication, author, topic"></label><button id="ss-refresh">Refresh</button><button data-export="csv">Export CSV</button><button data-export="json">Export JSON</button></div>
+      <div class="ss-toolbar"><label>Queue <select id="ss-scope"><option value="pilot">20-publication pilot</option><option value="shortlisted">Shortlist</option><option value="all">All imported + fixture</option></select></label><label>Status <select id="ss-status"><option value="">All statuses</option></select></label><label class="ss-search">Search <input id="ss-search" type="search" placeholder="Publication, author, topic"></label><button id="ss-refresh">Refresh</button><button data-export="csv">Export CSV</button><button data-export="json">Export JSON</button><button id="ss-contacts">Propose contacts from about pages</button></div>
       <div class="ss-layout"><aside class="ss-queue" aria-label="Publication queue"><div id="ss-list"></div><div class="ss-pagination"><button id="ss-prev">Previous</button><span id="ss-count"></span><button id="ss-next">Next</button></div></aside><section id="ss-detail" aria-label="Publication review"><div class="ss-empty"><h2>Choose a publication</h2><p>Review its sources, verify the name and contact route, then draft.</p><p>Subscriber counts are imported estimates. Metadata matches are only triage signals.</p></div></section></div>`;
   }
   async function start() {
@@ -44,6 +58,8 @@
     try {
       boot = await api('bootstrap');
       $('#ss-scope').options[0].textContent = `${boot.batch_size}-publication pilot`;
+      $('#ss-contacts').disabled = !(boot.collect_contacts && boot.network_enabled);
+      $('#ss-contacts').title = $('#ss-contacts').disabled ? 'Needs collect_contacts and network_enabled set to true in the local config' : `Reads up to ${boot.batch_size} pilot about pages`;
       $('#ss-status').insertAdjacentHTML('beforeend', boot.statuses.map(s => `<option>${esc(s)}</option>`).join(''));
       root.addEventListener('click', handleClick);
       root.addEventListener('change', e => { if (['ss-scope', 'ss-status'].includes(e.target.id)) { scope = val('scope'); offset = 0; refresh().catch(report); } });
@@ -70,7 +86,7 @@
   function renderDetail() {
     const p = selected, d = p.draft, e = p.evidence || p.evidence_candidate || {}, v = d?.validation;
     $('#ss-detail').innerHTML = `<div class="ss-detail-head"><p class="ss-eyebrow">${esc(p.status)} · RECORD ${p.id}</p><h2>${esc(p.publication || 'Unnamed publication')}</h2><p>${esc(p.author_name || 'Author unknown')} · ${link(p.publication_url, 'Publication')} · ${link(p.profile_url, 'Substack profile')}</p><div class="ss-tags"><span class="ss-chip">${esc(p.fit_category)}</span>${p.source_kind === 'user_fixture' ? '<span class="ss-chip ss-warning">USER-SUPPLIED FIXTURE · NOT FETCHED</span>' : ''}</div><p>${p.fit_reasons.map(esc).join(' ')}</p></div>
-      <div class="ss-card"><h3>Recipient & contact</h3><div class="ss-form-grid">${field('author', 'Public author name', p.author_name)}${field('first', 'Confirmed public first name (leave blank if unknown)', p.confirmed_first_name)}${field('name-source', 'Name source URL or user-supplied provenance', p.name_source)}${field('owner', 'Owner', p.owner)}${field('contact', 'Published business/contact/submission route', p.contact_route)}${field('contact-source', 'Contact source URL or user-supplied provenance', p.contact_source_url)}${select('contact-kind', 'Route type', ['', 'business', 'contact', 'submission', 'user_supplied', 'sponsorship'], p.contact_kind)}${select('fit', 'Fit category', boot.fits, p.fit_category)}</div><label><input id="ss-contact-confirmed" type="checkbox"${checked(p.contact_confirmed)}> I verified this published route or supplied it directly.</label><p><button data-action="metadata">Save recipient & owner</button> <button data-action="dnc" class="ss-danger">Do not contact author</button></p><p class="ss-note">Sponsorship routes are kept separate from editorial pitches. Confirmed identity links and contacts apply across publications and channels.</p><details><summary>Previous contact (${p.previous_contact.length}) & shared history</summary><pre>${esc(JSON.stringify(p.previous_contact, null, 2))}</pre><div class="ss-form-grid">${field('history-channel', 'Channel (email, Reddit, X, …)')}${field('history-source', 'Source: message URL or supplied record')}${field('history-alias', 'Optional explicit shared identity key')}${field('history-note', 'Contact note')}</div><button data-action="history">Record previous contact</button></details></div>
+      <div class="ss-card"><h3>Recipient & contact</h3><div class="ss-form-grid">${field('author', 'Public author name', p.author_name)}${field('first', 'Confirmed public first name (leave blank if unknown)', p.confirmed_first_name)}${field('name-source', 'Name source URL or user-supplied provenance', p.name_source)}${field('owner', 'Owner', p.owner)}${field('contact', 'Published business/contact/submission route', p.contact_route)}${field('contact-source', 'Contact source URL or user-supplied provenance', p.contact_source_url)}${select('contact-kind', 'Route type', ['', 'business', 'contact', 'submission', 'user_supplied', 'sponsorship', 'reply_to'], p.contact_kind)}${select('fit', 'Fit category', boot.fits, p.fit_category)}</div><label><input id="ss-contact-confirmed" type="checkbox"${checked(p.contact_confirmed)}> I verified this published route or supplied it directly.</label>${proposalHTML(p.contact_route_proposed)}<p><button data-action="metadata">Save recipient & owner</button> <button data-action="dnc" class="ss-danger">Do not contact author</button></p><p class="ss-note">Sponsorship routes are kept separate from editorial pitches. Confirmed identity links and contacts apply across publications and channels.</p><details><summary>Previous contact (${p.previous_contact.length}) & shared history</summary><pre>${esc(JSON.stringify(p.previous_contact, null, 2))}</pre><div class="ss-form-grid">${field('history-channel', 'Channel (email, Reddit, X, …)')}${field('history-source', 'Source: message URL or supplied record')}${field('history-alias', 'Optional explicit shared identity key')}${field('history-note', 'Contact note')}</div><button data-action="history">Record previous contact</button></details></div>
       <div class="ss-card"><h3>Article evidence</h3>${p.articles.length ? p.articles.map(a => `<div class="ss-source"><strong>${link(a.url, a.title || 'Untitled article')}</strong><p>${esc(a.date || 'Date unknown')} · ${esc(a.content_status)} · ${esc(a.source_kind)} · ${esc(a.byline || 'Byline unknown')}</p><blockquote>${esc(e.article_url === a.url ? e.supporting_excerpt : a.text.slice(0, 280))}</blockquote><details><summary>Collected text & provenance</summary><pre>${esc(a.text)}</pre><p>Retrieved: ${esc(a.retrieved_at)} · ${esc(a.permission_basis)} · ${link(a.source_url, 'Source')}</p></details></div>`).join('') : '<p>No collected article. Import supplied text or configure permitted publisher RSS.</p>'}
       <details><summary>Import article text or research export</summary><p>Paste a JSON array of up to five articles using the documented schema, or import the JSON file from the CLI. No article is fetched by this form.</p>${field('articles-json', 'Articles JSON', '[\n  {\n    "title": "", "url": "", "date": null, "byline": null,\n    "text": "", "content_status": "excerpt",\n    "source_kind": "manual", "source_url": "",\n    "permission_basis": "", "membership_confirmed": false,\n    "relationship_source": ""\n  }\n]', true)}<button data-action="research">Import research</button></details>
       <details><summary>Source permission & RSS settings</summary><p>Feed availability alone does not establish permission. The CLI collector also requires network_enabled=true.</p>${field('research-json', 'Permission record JSON', JSON.stringify(p.research && Object.keys(p.research).length ? p.research : { source_kind: 'publisher_rss', automated_use_permitted: false, permission_basis: '', permission_source_url: '', permission_review_date: '', feed_url: '' }, null, 2), true)}${field('publication-url', 'Resolved publication URL (not profile)', p.publication_url)}${field('publication-source', 'Evidence supporting publication URL', p.publication_url_source)}<button data-action="permission">Save source settings</button></details>
@@ -80,7 +96,12 @@
       <label><input id="ss-attest" type="checkbox"> I checked the article detail, fit, claims, launch wording, sender, one ask, source limitations and contact history. Automated checks are not a semantic guarantee.</label><div class="ss-actions"><button data-action="review">Mark reviewed</button><button data-action="approve">Approve current version</button><button data-action="sent">Record sent manually</button><button data-action="replied">Record reply</button></div>${field('skip-reason', 'Skip reason')}<button data-action="skip">Skip publication</button></div>
       <details class="ss-card"><summary>Original workbook fields (preserved)</summary><p>Subscriber counts are imported estimates, not independently verified. first_post_date is not recent activity.</p><pre>${esc(JSON.stringify(p.source, null, 2))}</pre></details>`;
     dirty = false;
-    $('#ss-ask-format').addEventListener('change', () => { $('#ss-ask').value = boot.asks[val('ask-format')]; });
+    $('#ss-ask-format').addEventListener('change', () => {
+      $('#ss-ask').value = boot.asks[val('ask-format')];
+      // The sponsorship offer belongs to the sponsored-post ask only.
+      const sponsorship = root.querySelector('input[name="ss-claim"][value="offer.sponsorship"]');
+      if (sponsorship) sponsorship.checked = val('ask-format') === 'sponsored post';
+    });
   }
   async function handleClick(event) {
     const button = event.target.closest('button');
@@ -89,6 +110,14 @@
       busy = true;
       if (button.dataset.pub) return await open(Number(button.dataset.pub));
       if (button.id === 'ss-refresh') return await refresh();
+      if (button.id === 'ss-contacts') {
+        notice('Reading about pages through the permission-gated collector…');
+        const { results } = await api('collect-contacts', { batch: boot.batch_size });
+        const count = key => results.filter(r => r.result === key).length;
+        notice(`About pages: ${count('proposed')} with proposals, ${count('none_found')} without contacts, ${results.filter(r => r.error).length} failed. Nothing is confirmed until you confirm it.`);
+        if (selected) { selected = await api('publication/' + selected.id); renderDetail(); }
+        return await refresh();
+      }
       if (button.id === 'ss-prev' || button.id === 'ss-next') { offset += button.id === 'ss-prev' ? -100 : 100; return await refresh(); }
       if (button.dataset.export) {
         const response = await fetch(`/api/substack/export?format=${button.dataset.export}&scope=${encodeURIComponent(scope)}`);
@@ -106,6 +135,7 @@
       if (action === 'metadata') { action = 'update'; data = { author_name: val('author'), confirmed_first_name: val('first'), name_source: val('name-source'), owner: val('owner'), contact_route: val('contact'), contact_source_url: val('contact-source'), contact_kind: val('contact-kind'), contact_confirmed: tick('contact-confirmed'), fit_category: val('fit') }; }
       else if (action === 'permission') { action = 'update'; data = { research: JSON.parse(val('research-json')), publication_url: val('publication-url'), publication_url_source: val('publication-source') }; }
       else if (action === 'research') data = { articles: JSON.parse(val('articles-json')) };
+      else if (['confirm-contact', 'dismiss-contact'].includes(action)) { data = { decision: action === 'confirm-contact' ? 'confirm' : 'dismiss', route: val('proposal-route'), contact_kind: val('proposal-kind'), reviewer: val('proposal-reviewer') }; action = 'contact_proposal'; }
       else if (action === 'evidence') {
         const a = selected.articles.find(a => a.url === val('article-choice'));
         if (!a) throw new Error('Select a collected article first.');

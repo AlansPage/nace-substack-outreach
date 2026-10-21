@@ -24,7 +24,7 @@
     },
     {
       "id": "product.model",
-      "email_phrase": "a multimodal decision model",
+      "email_phrase": "an example model described by your approved registry",
       "text": "EXAMPLE: a one-line description of your product.",
       "source": "EXAMPLE: placeholder entry. Replace with your own sourced, verified fact before use.",
       "approval_status": "pending",
@@ -45,7 +45,7 @@
     },
     {
       "id": "product.agents",
-      "email_phrase": "for browser-use agents making decisions from screenshots",
+      "email_phrase": "for the example use case your team approves",
       "text": "EXAMPLE: the intended use cases for your product.",
       "source": "EXAMPLE: placeholder entry. Replace with your own sourced, verified fact before use.",
       "approval_status": "pending",
@@ -119,6 +119,17 @@
       "id": "offer.questions",
       "email_phrase": "answer technical questions",
       "text": "We can answer technical questions.",
+      "source": "EXAMPLE: placeholder entry. Replace with your own sourced, verified fact before use.",
+      "approval_status": "pending",
+      "approved_by": null,
+      "approved_at": null,
+      "scope": "offer",
+      "expiry_or_review_date": null
+    },
+    {
+      "id": "offer.sponsorship",
+      "email_phrase": "a sponsored post at your published rate",
+      "text": "EXAMPLE: the sponsorship offer and rate policy your team approves. Only used when ask_format is 'sponsored post'.",
       "source": "EXAMPLE: placeholder entry. Replace with your own sourced, verified fact before use.",
       "approval_status": "pending",
       "approved_by": null,

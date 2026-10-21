@@ -56,7 +56,7 @@ def set_variant(pipeline, pid, variant):
          "review_flags": ["FIXTURE_ONLY_USER_SUPPLIED_NOT_FETCHED"], "evidence_reviewed_by": "User-supplied fixture only",
          "ask_format": "exploratory discussion", "email_detail": detail,
          "mock_opening": f"Your post ({ARTICLE})—especially {detail}—{connection}",
-         "mock_subject": f"Your post on {topic} × Drex Max"}
+         "mock_subject": f"Your post on {topic}"}
     pipeline.update(pid, {"evidence": e})
     return e
 
@@ -74,8 +74,8 @@ def previews(pipeline):
         e = dict(original, email_detail=detail, supporting_excerpt=detail, specific_point=detail,
                  suggested_ask=ask, drex_connection=connection,
                  mock_opening=f"Your post ({ARTICLE})—especially {detail}—{connection}",
-                 mock_subject=f"Your post on {topic} × Drex Max")
-        draft = MockWriter().generate(writing_input(pub, e, facts, pipeline.config["sender"]), e)
+                 mock_subject=f"Your post on {topic}")
+        draft = MockWriter(facts).generate(writing_input(pub, e, facts, pipeline.config["sender"]), e)
         results.append({"label": f"MOCK PREVIEW {i+1}: Alan fixture variant; user-supplied evidence, not fetched; pending product/offer approval; not send-ready",
                         **draft, "html_body": html_email(draft['plain_text_body']),
                         "checks": style_checks(draft["plain_text_body"], draft["subject"], e, pipeline.config["sender"])})

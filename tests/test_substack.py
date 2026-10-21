@@ -12,10 +12,14 @@ from substack_outreach.common import FITS, canonical, classify, dumps, html_emai
 from substack_outreach.config import ROOT, load_config
 from substack_outreach.evidence import ASKS, BASE_CLAIMS, evidence_checks, prepare_evidence, style_checks
 from substack_outreach.fixtures import add_fixture, previews
-from substack_outreach.models import MockWriter, OpenAIWriter, writing_input
-from substack_outreach.pipeline import Pipeline, csv_safe
-from substack_outreach.sources import Collector, Run, parse_feed, public_https, save_articles
+from substack_outreach.models import INSTRUCTIONS, SCHEMA, LocalWriter, MockWriter, OpenAIWriter, writing_input
+from html import escape as html_escape
+from substack_outreach.pipeline import Pipeline, csv_safe, mailto_link, sendsheet_html
+from substack_outreach.sources import Collector, Run, extract_contacts, parse_feed, public_https, save_articles
+from substack_outreach.store import load_dnc
 from substack_outreach.workbook import identifier, read_workbook
+
+FIXTURES = Path(__file__).resolve().parent / 'fixtures'
 
 
 def workbook(path, rows):
@@ -119,6 +123,144 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(classify({'name': 'Unknown', 'categories': 'Technology', 'free_subscribers': '10000000', 'first_post_date': now()})[0], FITS[4])
         self.assertEqual(classify({'hero_text': 'AI agents, LLM, inference and model evaluation'})[0], FITS[0])
         self.assertEqual(classify({'hero_text': 'Writing on digital minimalism and human agency'})[0], FITS[2])
+
+    def test_classifier_recall_fixture(self):
+        for case in json.loads((FIXTURES / 'classifier_rows.json').read_text(encoding='utf-8')):
+            fit, score, reasons = classify(case['row'])
+            self.assertEqual(fit, case['fit'], case['row']['name'])
+            signals = reasons[0].removeprefix('Local metadata signals: ').split(', ') if reasons[0].startswith('Local') else []
+            self.assertEqual(signals, case['signals'], case['row']['name'])
+
+    def test_technology_category_weight_ranks_but_is_not_fit_evidence(self):
+        row = {'hero_text': 'Weekly notes on how AI changes everyday office work'}
+        plain, tech = classify(row), classify(dict(row, categories='Technology; Podcasts'))
+        self.assertEqual(plain[0], tech[0])
+        self.assertEqual(tech[1], plain[1] + 5)
+        self.assertIn('Category weight +5: Technology; Podcasts', tech[2])
+        unrelated = classify({'hero_text': 'HTML and CSS layout tricks for hand-written pages', 'categories': 'Technology'})
+        self.assertEqual((unrelated[0], unrelated[1]), (FITS[3], 0))
+
+    def test_dnc_list_suppresses_vendor_publications_at_import(self):
+        self.config['dnc_path'] = str(FIXTURES / 'dnc.json')
+        path = self.path / 'input.xlsx'
+        workbook(path, [['pub_id', 'author_id', 'url', 'name', 'author_name', 'hero_text', 'categories'],
+            ['1', '10', 'https://www.vendorco-news.substack.com/', 'Vendor news', 'Press team', 'AI agents and LLM product updates', 'Technology'],
+            ['2', '11', 'https://ops.example', 'Ops', 'VendorCo Official', 'AI automation for operations teams', 'Technology'],
+            ['77', '12', 'https://lab.example', 'Lab', 'Lab desk', 'Deep learning research notes and ML', 'Technology'],
+            ['3', '13', 'https://employee.example', 'Personal', 'VendorCo Official fan', 'AI agents, written by an employee, not official', 'Technology']])
+        result = self.p.import_workbook(str(path), 20, 100)
+        self.assertEqual(result['dnc_list'], 'dnc.json')
+        self.assertEqual(sorted(r['matched'] for r in result['dnc_suppressed']), ['author_names', 'hosts', 'pub_ids'])
+        statuses = {self.p.store.get(i)['publication']: self.p.store.get(i)['status'] for i in (1, 2, 3, 4)}
+        self.assertEqual(statuses, {'Vendor news': 'Do not contact', 'Ops': 'Do not contact', 'Lab': 'Do not contact', 'Personal': 'Shortlisted'})
+        self.assertEqual(result['shortlisted'], 1)
+        reason = self.p.store.db.execute("SELECT reason FROM suppressions WHERE key='author:10'").fetchone()[0]
+        self.assertIn('VendorCo', reason)
+        self.assertIn('source: Test fixture', reason)
+        again = self.p.import_workbook(str(path), 20, 100)
+        self.assertTrue(again['resumed'])
+        self.assertEqual(again['dnc_suppressed'], [])
+
+    def test_dnc_falls_back_to_seed_and_rejects_entries_without_source(self):
+        self.config['dnc_path'] = str(self.path / 'missing.json')
+        entries, name = self.p.dnc_list()
+        self.assertEqual(name, 'dnc.example.json')
+        self.assertTrue(all(e['source'] for e in entries))
+        bad = self.path / 'bad.json'
+        bad.write_text(dumps({'entries': [{'owner': 'X', 'reason': 'Vendor', 'hosts': ['x.example']}]}), encoding='utf-8')
+        with self.assertRaisesRegex(ValueError, 'owner, reason and source'):
+            load_dnc(bad)
+
+    def use_phrases(self):
+        phrases = json.loads((FIXTURES / 'registry_phrases.json').read_text(encoding='utf-8'))
+        for e in self.facts['entries']:
+            if e['id'] in phrases:
+                e['email_phrase'] = phrases[e['id']]
+        (self.path / 'facts.json').write_text(dumps(self.facts), encoding='utf-8')
+        return phrases
+
+    def test_mock_wording_comes_from_registry_phrases(self):
+        phrases = self.use_phrases()
+        pid, p = self.ready()
+        body = p['draft']['plain_text_body']
+        self.assertIn("I'm Your Name from Nace AI, working on " + phrases['product.model'] + ', ' + phrases['product.agents'] + '.', body)
+        self.assertIn('We can offer fixture evaluation credits and answer fixture questions.', body)
+        self.assertNotIn('Drex Max', body + p['draft']['subject'])
+        self.assertNotIn('screenshot', body)
+        self.assertFalse([f for f in p['draft']['review_flags'] if f.startswith('CLAIM_SCOPE_OR_TEXT_CHANGED')])
+
+    def test_mock_previews_pending_phrase_but_never_unselected_or_rejected(self):
+        phrases = self.use_phrases()
+        self.facts['entries'][[e['id'] for e in self.facts['entries']].index('product.agents')]['approval_status'] = 'rejected'
+        (self.path / 'facts.json').write_text(dumps(self.facts), encoding='utf-8')
+        pid = self.pub(); self.research(pid)
+        e = self.p.store.get(pid)['evidence']; e['selected_claim_ids'] = [c for c in e['selected_claim_ids'] if c != 'offer.questions']
+        self.p.update(pid, {'evidence': e})
+        d = self.p.generate(pid)['draft']
+        self.assertIn(phrases['product.model'], d['plain_text_body'])
+        self.assertIn('CLAIM_NOT_APPROVED:product.model', d['review_flags'])
+        for cid in ('product.agents', 'offer.questions'):
+            self.assertNotIn(phrases[cid], d['plain_text_body'])
+            self.assertNotIn(cid, d['claim_ids_used'])
+        self.assertIn('PRODUCT_USE_CASE_SUPPORT_OR_LINK_MISSING', d['review_flags'])
+
+    def test_no_product_name_or_capability_hard_coded(self):
+        from substack_outreach.models import INSTRUCTIONS
+        reference = INSTRUCTIONS[INSTRUCTIONS.index('STRUCTURAL EXAMPLE ONLY'):]
+        self.assertIn('[APPROVED PRODUCT MODEL PHRASE]', reference)
+        self.assertNotIn('release', reference)
+        for path in (ROOT / 'substack_outreach').glob('*.*'):
+            if path.suffix in ('.py', '.txt', '.js') :
+                text = path.read_text(encoding='utf-8')
+                for term in ('Drex Max', 'screenshots', 'browser-use agents', 'multimodal decision model'):
+                    self.assertNotIn(term, text, f'{path.name} hard-codes {term!r}')
+
+    def select_offer(self, pid, ask_format):
+        fx = json.loads((FIXTURES / 'sponsored_selection.json').read_text(encoding='utf-8'))
+        e = self.p.store.get(pid)['evidence']
+        e.update(selected_claim_ids=fx['selected_claim_ids'], ask_format=ask_format, suggested_ask=ASKS[ask_format])
+        self.p.update(pid, {'evidence': e})
+        return fx, e
+
+    def test_sponsored_ask_exists_but_default_stays_editorial(self):
+        self.assertIn('sponsored post', ASKS)
+        pid = self.pub(); self.research(pid)
+        e = self.p.store.get(pid)['evidence']
+        self.assertEqual(e['ask_format'], 'technical walkthrough')
+        self.assertNotIn('offer.sponsorship', e['selected_claim_ids'])
+        from substack_outreach.models import INSTRUCTIONS
+        paragraph3 = ' '.join(INSTRUCTIONS[INSTRUCTIONS.index('Paragraph 3'):INSTRUCTIONS.index('Explore Drex')].split())
+        self.assertIn('selected approved offer', paragraph3)
+        self.assertNotIn('API credits', paragraph3)
+
+    def test_editorial_ask_never_states_sponsorship_even_when_selected(self):
+        pid = self.pub(); self.research(pid); self.approve_facts()
+        fx, e = self.select_offer(pid, 'technical walkthrough')
+        facts, _ = self.p.facts()
+        payload = writing_input(self.p.store.get(pid), e, facts, self.config['sender'])
+        self.assertNotIn('offer.sponsorship', [f['id'] for f in payload['approved_facts']])
+        self.assertEqual(payload['pitch_angle']['ask_format'], 'technical walkthrough')
+        d = self.p.generate(pid)['draft']
+        self.assertIn(fx['editorial_sentence'], d['plain_text_body'])
+        self.assertNotIn('sponsor', d['plain_text_body'].lower())
+        self.assertNotIn('offer.sponsorship', d['claim_ids_used'])
+        d = self.p.edit(pid, {'subject': d['subject'], 'plain_text_body': d['plain_text_body'], 'claim_ids_used': d['claim_ids_used'] + ['offer.sponsorship']})['draft']
+        self.assertIn('SPONSORSHIP_OFFER_REQUIRES_SPONSORED_ASK', d['validation']['blocking_flags'])
+
+    def test_sponsored_ask_states_only_the_sponsorship_offer(self):
+        pid = self.pub(); self.research(pid); self.approve_facts()
+        fx, e = self.select_offer(pid, 'sponsored post')
+        facts, _ = self.p.facts()
+        payload = writing_input(self.p.store.get(pid), e, facts, self.config['sender'])
+        self.assertEqual([f['id'] for f in payload['approved_facts'] if f['scope'] == 'offer'], ['offer.sponsorship'])
+        d = self.p.generate(pid)['draft']
+        self.assertIn(ASKS['sponsored post'] + ' ' + fx['sponsorship_sentence'], d['plain_text_body'])
+        self.assertNotIn('API credits', d['plain_text_body'])
+        self.assertIn('offer.sponsorship', d['claim_ids_used'])
+        self.assertNotIn('SPONSORED_ASK_REQUIRES_SPONSORSHIP_OFFER', d['review_flags'])
+        # Still blocked: the "sponsor" wording check and the base-claim requirement are unchanged.
+        for flag in ('UNSUPPORTED_PROMISE_OR_PLACEHOLDER', 'PRODUCT_USE_CASE_SUPPORT_OR_LINK_MISSING'):
+            self.assertIn(flag, d['validation']['blocking_flags'])
 
     def test_pending_claims_and_mock_cannot_approve(self):
         pid = self.pub(); self.research(pid)
@@ -286,6 +428,224 @@ class PipelineTests(unittest.TestCase):
                 Collector(self.p.store, self.config, run).collect(self.p.store.get(pid))
             fetch.assert_not_called()
 
+    def default_permission_pub(self, pub_id='555', research=None):
+        pid = self.pub()
+        pub = self.p.store.get(pid)
+        pub['source'] = {'pub_id': pub_id} if pub_id else {}
+        pub['research'] = research or {}
+        self.p.store.save(pub); self.p.store.db.commit()
+        self.config['network_enabled'] = True
+        self.config['default_feed_permission'] = json.loads((FIXTURES / 'default_feed_permission.json').read_text(encoding='utf-8'))
+        return pid
+
+    def test_default_feed_permission_collects_custom_domain(self):
+        pid = self.default_permission_pub()
+        pages = {'https://testing.example': (FIXTURES / 'custom_domain_home.html').read_bytes(),
+                 'https://testing.example/feed': (FIXTURES / 'custom_domain_feed.xml').read_bytes()}
+        collector = Collector(self.p.store, self.config, Run(self.p.store, self.config, 'test'))
+        with patch.object(collector, 'allowed_get', side_effect=lambda url, host: pages[url]) as fetch:
+            rows = collector.collect(self.p.store.get(pid))
+        self.assertEqual([c.args for c in fetch.call_args_list], [('https://testing.example', 'testing.example'), ('https://testing.example/feed', 'testing.example')])
+        self.assertEqual(rows[0]['url'], 'https://testing.example/p/scoring')
+        self.assertTrue(rows[0]['membership_confirmed'])
+        self.assertEqual(rows[0]['permission_source_url'], 'https://policy.example/substack-research')
+        self.assertIn('team policy', rows[0]['permission_basis'])
+
+    def test_default_feed_permission_never_overrides_or_widens(self):
+        collector = lambda: Collector(self.p.store, self.config, Run(self.p.store, self.config, 'test'))
+        # Explicit research block wins, even when incomplete.
+        pid = self.default_permission_pub(research={'source_kind': 'publisher_rss', 'permission_basis': 'Explicit but not permitted'})
+        with self.assertRaisesRegex(ValueError, 'SOURCE_PERMISSION_REQUIRED'):
+            collector().permission(self.p.store.get(pid))
+        # Not a workbook Substack row: no pub_id.
+        pid = self.default_permission_pub(pub_id=None)
+        with self.assertRaisesRegex(ValueError, 'SOURCE_PERMISSION_REQUIRED'):
+            collector().permission(self.p.store.get(pid))
+        # Unresolved publication URL.
+        pid = self.default_permission_pub()
+        self.p.store.db.execute("UPDATE publications SET data=json_set(data,'$.publication_url','') WHERE id=?", (pid,))
+        with self.assertRaisesRegex(ValueError, 'SOURCE_PERMISSION_REQUIRED'):
+            collector().permission(self.p.store.get(pid))
+        # Expired review date and the default null value.
+        pid = self.default_permission_pub()
+        self.config['default_feed_permission']['permission_review_date'] = '2000-01-01'
+        with self.assertRaisesRegex(ValueError, 'SOURCE_PERMISSION_REVIEW_REQUIRED'):
+            collector().permission(self.p.store.get(pid))
+        self.config['default_feed_permission'] = None
+        with self.assertRaisesRegex(ValueError, 'SOURCE_PERMISSION_REQUIRED'):
+            collector().permission(self.p.store.get(pid))
+
+    def test_default_feed_permission_config_shape(self):
+        good = json.loads((FIXTURES / 'default_feed_permission.json').read_text(encoding='utf-8'))
+        self.assertIsNone(load_config()['default_feed_permission'])
+        for bad in ({}, dict(good, feed_url='https://x.example/feed'), dict(good, permission_source_url='http://policy.example'),
+                    dict(good, permission_review_date='soon'), dict(good, permission_basis='ok'), 'yes'):
+            path = self.path / 'cfg.json'
+            path.write_text(dumps({'default_feed_permission': bad}), encoding='utf-8')
+            with self.assertRaisesRegex(ValueError, 'default_feed_permission'):
+                load_config(path)
+        path.write_text(dumps({'default_feed_permission': good}), encoding='utf-8')
+        self.assertEqual(load_config(path)['default_feed_permission'], good)
+
+    ABOUT = [{'route': 'Editor@Testing.example', 'type': 'email', 'found_as': 'mailto link'},
+             {'route': 'partners@testing.example', 'type': 'email', 'found_as': 'visible text'},
+             {'route': 'https://x.com/samexample', 'type': 'x', 'found_as': 'link'},
+             {'route': 'https://linkedin.com/in/sam-example', 'type': 'linkedin', 'found_as': 'link'},
+             {'route': 'https://samexample.dev', 'type': 'site', 'found_as': 'link'}]
+
+    def test_about_page_contact_extraction(self):
+        page = (FIXTURES / 'about_page.html').read_text(encoding='utf-8')
+        self.assertEqual(extract_contacts(page, 'https://testing.example/about'), self.ABOUT)
+
+    def contact_pub(self):
+        pid = self.pub()
+        self.p.update(pid, {'contact_route': '', 'contact_source_url': '', 'contact_kind': '', 'contact_confirmed': False})
+        self.config.update(collect_contacts=True, network_enabled=True)
+        return pid
+
+    def test_collect_contacts_stores_unconfirmed_proposal_that_blocks_approval(self):
+        pid = self.contact_pub()
+        page = (FIXTURES / 'about_page.html').read_bytes()
+        with patch.object(Collector, 'allowed_get', return_value=page) as fetch:
+            results = self.p.collect_contacts(5)
+            self.assertEqual(fetch.call_args.args, ('https://testing.example/about', 'testing.example'))
+            self.assertEqual(self.p.collect_contacts(5), [])  # resumable: no second fetch
+            self.assertEqual(fetch.call_count, 1)
+        self.assertEqual(results[0]['result'], 'proposed')
+        pub = self.p.store.get(pid)
+        proposal = pub['contact_route_proposed']
+        self.assertEqual((proposal['route'], proposal['contact_source_url'], proposal['contact_confirmed']),
+                         ('Editor@Testing.example', 'https://testing.example/about', False))
+        self.assertEqual(proposal['candidates'], self.ABOUT)
+        self.assertEqual((pub['contact_route'], pub['contact_confirmed']), ('', False))
+        self.research(pid)
+        draft = self.p.generate(pid)['draft']
+        self.assertIn('CONTACT_PROPOSED_UNCONFIRMED', draft['validation']['blocking_flags'])
+        with self.assertRaisesRegex(ValueError, 'CONTACT_PROPOSED_UNCONFIRMED'):
+            self.p.action(pid, 'approve', {'reviewer': 'X', 'semantic_review_confirmed': True})
+        with self.assertRaisesRegex(ValueError, 'named reviewer'):
+            self.p.action(pid, 'contact_proposal', {'decision': 'confirm'})
+        with self.assertRaisesRegex(ValueError, 'one of the proposed routes'):
+            self.p.action(pid, 'contact_proposal', {'decision': 'confirm', 'route': 'other@else.example', 'reviewer': 'Human'})
+        p = self.p.action(pid, 'contact_proposal', {'decision': 'confirm', 'route': 'partners@testing.example', 'contact_kind': 'business', 'reviewer': 'Human'})
+        self.assertEqual((p['contact_route'], p['contact_source_url'], p['contact_kind'], p['contact_confirmed']),
+                         ('partners@testing.example', 'https://testing.example/about', 'business', True))
+        self.assertEqual((p['contact_route_proposed']['status'], p['contact_route_proposed']['decided_by']), ('confirmed', 'Human'))
+        self.assertNotIn('CONTACT_PROPOSED_UNCONFIRMED', p['draft']['review_flags'])
+
+    def test_contact_proposal_dismiss_and_gates(self):
+        pid = self.contact_pub()
+        self.config['collect_contacts'] = False
+        with patch.object(Collector, 'allowed_get') as fetch:
+            with self.assertRaisesRegex(ValueError, 'CONTACT_COLLECTION_DISABLED'):
+                self.p.collect_contacts()
+            self.config.update(collect_contacts=True, network_enabled=False)
+            with self.assertRaisesRegex(ValueError, 'NETWORK_DISABLED'):
+                self.p.collect_contacts()
+            fetch.assert_not_called()
+        self.config['network_enabled'] = True
+        with patch.object(Collector, 'allowed_get', return_value=(FIXTURES / 'about_page.html').read_bytes()):
+            self.p.collect_contacts()
+        p = self.p.action(pid, 'contact_proposal', {'decision': 'dismiss', 'reviewer': 'Human'})
+        self.assertEqual((p['contact_route'], p['contact_route_proposed']['status']), ('', 'dismissed'))
+        with self.assertRaisesRegex(ValueError, 'No unresolved'):
+            self.p.action(pid, 'contact_proposal', {'decision': 'confirm', 'reviewer': 'Human'})
+
+    def test_contact_collection_obeys_robots_and_retries_failed_only_on_request(self):
+        pid = self.contact_pub()
+        def get(collector, url, host, use_cache=True):
+            return b'User-agent: *\nDisallow: /about\n' if url.endswith('/robots.txt') else self.fail('about page fetched despite robots')
+        with patch.object(Collector, 'get', get):
+            self.assertIn('ROBOTS_DISALLOWED', self.p.collect_contacts()[0]['error'])
+        self.assertEqual(self.p.store.get(pid)['contact_route_proposed']['status'], 'failed')
+        self.assertEqual(self.p.collect_contacts(), [])
+        with patch.object(Collector, 'allowed_get', return_value=b'<p>No contact here.</p>'):
+            self.assertEqual(self.p.collect_contacts(retry_failed=True)[0]['result'], 'none_found')
+        self.assertNotIn('CONTACT_PROPOSED_UNCONFIRMED', str(self.p.store.get(pid)))
+
+    def bare_pub(self, name, url, author):
+        pid = self.pub(name, author)
+        self.p.store.db.execute("UPDATE publications SET data=json_set(data,'$.publication_url',?,'$.contact_route','','$.contact_source_url','','$.contact_kind','','$.contact_confirmed',json('false')) WHERE id=?", (url, pid))
+        self.p.store.db.commit()
+        return pid
+
+    def test_reply_to_import_matches_by_url_then_host_and_reports_the_rest(self):
+        alpha = self.bare_pub('Alpha', 'https://alpha.example', 'author:a')
+        beta = self.bare_pub('Beta', 'https://beta.example', 'author:b')
+        gamma = self.bare_pub('Gamma', 'https://gamma.example', 'author:g')
+        testing = self.pub()  # already has a confirmed business route
+        report = self.p.import_reply_to(json.loads((FIXTURES / 'replyto_export.json').read_text(encoding='utf-8')))
+        self.assertEqual([(r['publication_id'], r['matched_by']) for r in report['imported']], [(alpha, 'publication_url'), (beta, 'host')])
+        self.assertEqual([r['reason'] for r in report['unmatched']], ['no_match', 'no_publication_url'])
+        self.assertEqual([(r['publication_id'], r['index']) for r in report['skipped']], [(alpha, 2), (testing, 5)])
+        self.assertEqual([r['index'] for r in report['invalid']], [6, 7, 8])
+        self.assertIn('Contact route must be', report['invalid'][0]['reason'])
+        a = self.p.store.get(alpha)
+        self.assertEqual((a['contact_route'], a['contact_source_url'], a['contact_kind'], a['contact_confirmed']),
+                         ('reply@alpha.example', 'https://mail.google.com/mail/u/0/#all/t-alpha', 'reply_to', False))
+        self.assertEqual(self.p.store.get(testing)['contact_route'], 'business@testing.example')
+        self.assertEqual(self.p.store.get(gamma)['contact_route'], '')
+        self.assertFalse(self.p.store.db.execute("SELECT 1 FROM publications WHERE data LIKE '%unknown.example%'").fetchone())
+        self.research(alpha)
+        flags = self.p.generate(alpha)['draft']['validation']['blocking_flags']
+        self.assertIn('CONTACT_UNVERIFIED', flags)
+        self.assertIn('EDITORIAL_CONTACT_ROUTE_REQUIRED', flags)
+
+    def test_contacts_import_cli_writes_private_report(self):
+        import subprocess, sys
+        cfg = self.path / 'cfg.json'
+        cfg.write_text(dumps({'database': self.config['database'], 'registry_path': self.config['registry_path']}), encoding='utf-8')
+        self.bare_pub('Alpha', 'https://alpha.example', 'author:a')
+        report = self.path / 'report.json'
+        r = subprocess.run([sys.executable, '-m', 'substack_outreach', '--config', str(cfg), 'contacts-import', str(FIXTURES / 'replyto_export.json'), '--report', str(report)],
+                           cwd=ROOT, capture_output=True, text=True, encoding='utf-8')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout)['imported'], 1)
+        self.assertEqual(len(json.loads(report.read_text(encoding='utf-8'))['unmatched']), 5)
+        r = subprocess.run([sys.executable, '-m', 'substack_outreach', '--config', str(cfg), 'contacts-import', str(FIXTURES / 'replyto_export.json'), '--report', str(ROOT / 'public' / 'r.json')],
+                           cwd=ROOT, capture_output=True, text=True, encoding='utf-8')
+        self.assertEqual(r.returncode, 2)
+        self.assertIn('public static assets', r.stderr)
+
+    def test_sendsheet_lists_only_current_approved_drafts(self):
+        fx = json.loads((FIXTURES / 'sendsheet.json').read_text(encoding='utf-8'))
+        pid, p = self.ready()
+        p = self.p.edit(pid, {'subject': fx['subject'], 'plain_text_body': p['draft']['plain_text_body'], 'human_authored': True})
+        self.assertEqual(p['draft']['validation']['blocking_flags'], [])
+        self.p.action(pid, 'approve', {'reviewer': 'Human', 'semantic_review_confirmed': True})
+        other = self.pub('Unapproved publication', 'author:99'); self.research(other); self.p.generate(other)
+        page = self.p.export('sendsheet')
+        self.assertEqual(page.count('<article>'), 1)
+        self.assertNotIn('Unapproved publication', page)
+        self.assertIn('Q&amp;A? &lt;b&gt;agents&lt;/b&gt; &amp; &quot;scoring&quot;', page)
+        self.assertNotIn('<b>agents', page)
+        body = self.p.store.get(pid)['draft']['plain_text_body']
+        self.assertIn(html_escape(mailto_link('business@testing.example', fx['subject'], body)), page)
+        self.assertEqual(page.count('data-copy="'), 3)
+        self.assertIn('Nothing is sent from this page', page)
+        # A withdrawn approval (registry change) drops the draft from the sheet.
+        self.facts['entries'][2]['approval_status'] = 'pending'
+        (self.path / 'facts.json').write_text(dumps(self.facts), encoding='utf-8')
+        self.assertIn('No publication is currently approved', self.p.export('sendsheet'))
+
+    def test_sendsheet_mailto_encoding_and_url_routes(self):
+        fx = json.loads((FIXTURES / 'sendsheet.json').read_text(encoding='utf-8'))
+        m = fx['mailto']
+        self.assertEqual(mailto_link(m['to'], m['subject'], m['body']), m['expected'])
+        page = sendsheet_html([fx['url_route_row']], now())
+        self.assertNotIn('mailto:', page)
+        self.assertIn('href="https://forms.example/submit"', page)
+        import subprocess, sys
+        cfg = self.path / 'cfg.json'
+        cfg.write_text(dumps({'database': self.config['database'], 'registry_path': self.config['registry_path']}), encoding='utf-8')
+        run = lambda out: subprocess.run([sys.executable, '-m', 'substack_outreach', '--config', str(cfg), 'export', '--format', 'sendsheet', '--out', str(out)],
+                                         cwd=ROOT, capture_output=True, text=True, encoding='utf-8')
+        self.assertEqual(run(self.path / 'sheet.html').returncode, 0)
+        self.assertIn('<!doctype html>', (self.path / 'sheet.html').read_text(encoding='utf-8'))
+        refused = run(ROOT / 'public' / 'sheet.html')
+        self.assertEqual(refused.returncode, 2)
+        self.assertIn('public static assets', refused.stderr)
+
     def test_rss_and_atom_parsing_and_incomplete_content(self):
         rss = b'<rss xmlns:content="http://purl.org/rss/1.0/modules/content/"><channel><item><title>Old</title><link>https://x.example/old</link><pubDate>Tue, 01 Sep 2026 12:00:00 GMT</pubDate><description>Old excerpt</description></item><item><title>New</title><link>https://x.example/new</link><pubDate>Thu, 01 Oct 2026 12:00:00 GMT</pubDate><content:encoded>&lt;p&gt;Available text&lt;/p&gt;</content:encoded></item></channel></rss>'
         rows = parse_feed(rss, 'https://x.example/feed', 1)
@@ -350,6 +710,97 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(run.usage[0]['usage']['input_tokens'], 100)
         self.assertIsNone(run.usage[0]['actual_cost_usd'])
         self.assertAlmostEqual(run.usage[0]['estimated_cost_usd'], .0005)
+
+    def ollama_response(self, draft, finish='stop'):
+        envelope = json.loads((FIXTURES / 'ollama_chat_response.json').read_text(encoding='utf-8'))
+        envelope['choices'][0]['message']['content'] = dumps(draft)
+        envelope['choices'][0]['finish_reason'] = finish
+        class FakeResponse(io.BytesIO):
+            pass
+        return FakeResponse(dumps(envelope).encode())
+
+    def test_config_provider_whitelist_and_loopback_local_url(self):
+        cfg = self.path / 'cfg.json'
+        for provider, ok in (('mock', True), ('openai', True), ('local', True), ('anthropic', False), ('ollama', False)):
+            cfg.write_text(dumps({'provider': provider}), encoding='utf-8')
+            if ok:
+                self.assertEqual(load_config(cfg)['provider'], provider)
+            else:
+                with self.assertRaisesRegex(ValueError, 'Supported writing adapters: mock, openai, local'):
+                    load_config(cfg)
+        self.assertEqual(load_config()['local_base_url'], 'http://127.0.0.1:11434')
+        for url in ('http://localhost:11434', 'http://[::1]:11434'):
+            cfg.write_text(dumps({'provider': 'local', 'local_base_url': url}), encoding='utf-8')
+            self.assertEqual(load_config(cfg)['local_base_url'], url)
+        for url in ('http://192.168.1.20:11434', 'https://ollama.example', 'http://user:pw@127.0.0.1:11434', 'file:///tmp/x', ''):
+            cfg.write_text(dumps({'provider': 'local', 'local_base_url': url}), encoding='utf-8')
+            with self.assertRaisesRegex(ValueError, 'loopback'):
+                load_config(cfg)
+
+    def test_local_writer_request_shape_usage_and_cache(self):
+        pid = self.pub(); self.research(pid); self.approve_facts()
+        # No budget, pricing or key is needed for a local model.
+        self.config.update(provider='local', model='fixture-model', allow_paid_calls=False, budget_usd_per_run=0)
+        pub = self.p.store.get(pid); facts, _ = self.p.facts()
+        payload = writing_input(pub, pub['evidence'], facts, self.config['sender'])
+        output = MockWriter().generate(payload, pub['evidence'])
+        run = Run(self.p.store, self.config, 'test')
+        with patch.dict('os.environ', {}, clear=True), patch('urllib.request.OpenerDirector.open', return_value=self.ollama_response(output)) as call:
+            writer = LocalWriter(self.p.store, self.config, run)
+            self.assertEqual(writer.generate(payload, pub['evidence']), output)
+            request = call.call_args[0][0]
+            self.assertEqual(request.full_url, 'http://127.0.0.1:11434/v1/chat/completions')
+            self.assertIsNone(request.get_header('Authorization'))
+            body = json.loads(request.data)
+            self.assertEqual(body['model'], 'fixture-model')
+            self.assertEqual(body['response_format'], {'type': 'json_schema', 'json_schema': {'name': 'outreach_email', 'strict': True, 'schema': SCHEMA}})
+            self.assertEqual(body['messages'][0], {'role': 'system', 'content': INSTRUCTIONS})
+            self.assertNotIn('tools', body)
+            writer.generate(payload, pub['evidence'])
+            self.assertEqual(call.call_count, 1)
+        self.assertEqual(run.requests, 1)
+        self.assertEqual(run.usage[0]['provider'], 'local')
+        self.assertEqual(run.usage[0]['usage'], {'input_tokens': 812, 'output_tokens': 164})
+        self.assertIsNone(run.usage[0]['actual_cost_usd'])
+        self.assertNotIn('estimated_cost_usd', run.usage[0])
+
+    def test_local_writer_rejects_bad_output_and_needs_model(self):
+        pid = self.pub(); self.research(pid); self.approve_facts()
+        self.config.update(provider='local', model='')
+        run = Run(self.p.store, self.config, 'test')
+        with self.assertRaisesRegex(ValueError, 'Set model'):
+            LocalWriter(self.p.store, self.config, run)
+        self.config['model'] = 'fixture-model'
+        pub = self.p.store.get(pid); facts, _ = self.p.facts()
+        payload = writing_input(pub, pub['evidence'], facts, self.config['sender'])
+        for response, message in ((self.ollama_response({'subject': 'x'}), 'expected schema'),
+                                  (self.ollama_response(MockWriter().generate(payload, pub['evidence']), 'length'), 'incomplete')):
+            with patch('urllib.request.OpenerDirector.open', return_value=response):
+                with self.assertRaisesRegex(ValueError, message):
+                    LocalWriter(self.p.store, self.config, run).generate(payload, pub['evidence'])
+
+    def test_local_provider_keeps_review_gate_and_one_revision(self):
+        pid = self.pub(); self.research(pid); self.approve_facts()
+        self.config.update(provider='local', model='fixture-model')
+        pub = self.p.store.get(pid); facts, _ = self.p.facts()
+        bad = MockWriter().generate(writing_input(pub, pub['evidence'], facts, self.config['sender']), pub['evidence'])
+        bad['subject'] = '[recipient]'
+        e = self.p.store.get(pid)['evidence']; e['evidence_reviewed_by'] = ''
+        self.p.update(pid, {'evidence': e})
+        with patch('urllib.request.OpenerDirector.open') as call:
+            with self.assertRaisesRegex(ValueError, 'Review the evidence-backed angle'):
+                self.p.generate(pid)
+            call.assert_not_called()
+        e['evidence_reviewed_by'] = 'Test reviewer'
+        self.p.update(pid, {'evidence': e})
+        with patch('urllib.request.OpenerDirector.open', side_effect=lambda *a, **k: self.ollama_response(bad)) as call:
+            d = self.p.generate(pid)['draft']
+        self.assertEqual(call.call_count, 2)
+        self.assertIn('revision_request', call.call_args_list[1][0][0].data.decode())
+        self.assertEqual((d['provider'], d['model']), ('local', 'fixture-model'))
+        self.assertIn('UNRESOLVED_PLACEHOLDER', d['review_flags'])
+        usage = self.p.store.metrics()['runs'][0]['usage']
+        self.assertEqual([u['provider'] for u in usage], ['local', 'local'])
 
     def test_feed_cache_only_keeps_selected_articles(self):
         pid = self.pub()

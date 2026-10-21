@@ -1,0 +1,13 @@
+[
+  {"row": {"name": "Plain AI", "hero_text": "Weekly notes on how AI changes everyday office work", "categories": "Technology"}, "fit": "Relevant industry/application fit", "signals": ["AI"]},
+  {"row": {"name": "Dotted", "hero_text": "Essays on A.I. and the people who build it, every Sunday", "categories": "Technology"}, "fit": "Relevant industry/application fit", "signals": ["A.I."]},
+  {"row": {"name": "Prompting", "hero_text": "Practical GPT prompts and ChatGPT habits for busy teams", "categories": "Technology"}, "fit": "Relevant industry/application fit", "signals": ["GPT", "ChatGPT"]},
+  {"row": {"name": "Weekly", "hero_text": "Deep learning papers explained, with a little ML history each week", "categories": "Technology"}, "fit": "Strong technical fit", "signals": ["ML", "deep learning"]},
+  {"row": {"name": "Agents", "hero_text": "We test agents and data science notebooks so you do not have to", "categories": "Technology; Podcasts"}, "fit": "Strong technical fit", "signals": ["agents", "data science"]},
+  {"row": {"name": "Nested terms", "hero_text": "Building AI agents with generative AI, one tutorial at a time", "categories": "Technology"}, "fit": "Relevant industry/application fit", "signals": ["AI agents", "generative AI"]},
+  {"row": {"name": "Ops", "hero_text": "Automation recipes for small finance teams and their spreadsheets", "categories": "Business"}, "fit": "Relevant industry/application fit", "signals": ["automation"]},
+  {"row": {"name": "Japanese", "hero_text": "AIとWeb3を武器に、ゼロから世界へ挑戦するプロセスを公開します", "categories": "Technology"}, "fit": "Relevant industry/application fit", "signals": ["AI"]},
+  {"row": {"name": "Cuisine", "hero_text": "J'ai testé 100 ml de chaque sauce, recettes et carnets de voyage", "categories": "Food"}, "fit": "Unrelated", "signals": []},
+  {"row": {"name": "Markup", "hero_text": "HTML and CSS layout tricks for people who still hand-write web pages", "categories": "Technology"}, "fit": "Unrelated", "signals": []},
+  {"row": {"name": "Vendor watch", "hero_text": "Commentary on OpenAI press releases and other company announcements", "categories": "Technology"}, "fit": "Unrelated", "signals": []}
+]

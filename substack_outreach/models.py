@@ -6,9 +6,10 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from .common import digest, dumps, now
-from .evidence import BASE_CLAIMS
+from .evidence import BASE_CLAIMS, offers_for
 from .sources import NoRedirect
 
 INSTRUCTIONS = Path(__file__).with_name("writing_instructions.txt").read_text(encoding="utf-8")
@@ -18,7 +19,9 @@ SCHEMA = {"type": "object", "properties": {"subject": {"type": "string"}, "plain
 
 
 def writing_input(pub, evidence, facts, sender):
-    selected = set(evidence["selected_claim_ids"])
+    offers = [e["id"] for e in facts["entries"] if e["scope"] == "offer"]
+    # The writer only sees the offers this ask format may state (sponsorship never rides on an editorial ask).
+    selected = set(evidence["selected_claim_ids"]) - set(offers) | set(offers_for(evidence.get("ask_format"), [c for c in offers if c in evidence["selected_claim_ids"]]))
     approved = [{k: e[k] for k in ("id", "text", "scope", "email_phrase") if k in e}
                 for e in facts["entries"] if e["id"] in selected and e["approval_status"] == "approved"
                 and (not e.get("expiry_or_review_date") or e["expiry_or_review_date"] >= now()[:10])]
@@ -26,25 +29,133 @@ def writing_input(pub, evidence, facts, sender):
             "sender": sender, "article": {"title": evidence["article_title"], "url": evidence["article_url"],
             "excerpt": evidence["supporting_excerpt"]},
             "pitch_angle": {"connection": evidence["drex_connection"], "suggested_ask": evidence["suggested_ask"],
+                            "ask_format": evidence.get("ask_format") or "",
                             "exploratory": evidence["fit_category"] == "Exploratory editorial fit"},
             "approved_facts": approved, "confirmed_launch_status": facts["launch_status"],
             "previous_contact": [{k: c.get(k) for k in ("channel", "event", "at")} for c in pub.get("previous_contact", [])]}
 
 
 class MockWriter:
+    """Deterministic preview. Product and offer wording comes only from the facts registry."""
     name = "mock"
+
+    def __init__(self, facts=None):
+        # The registry lets a preview show pending wording; validation then flags CLAIM_NOT_APPROVED.
+        self.facts = facts
+
+    def phrases(self, payload, evidence):
+        # Approved facts arrive exactly as the live writer receives them in writing_input().
+        found = {f["id"]: f.get("email_phrase") or f["text"] for f in payload["approved_facts"]}
+        selected = set(evidence.get("selected_claim_ids") or [])
+        for e in (self.facts or {}).get("entries", []):
+            if e["id"] in selected and e["id"] not in found and e["approval_status"] == "pending":
+                found[e["id"]] = e.get("email_phrase") or e["text"]
+        return found
 
     def generate(self, payload, evidence, revision=None):
         sender = payload["sender"]["name"]
         first = payload["recipient"]["first_name"]
+        phrase = self.phrases(payload, evidence)
+        scopes = {e["id"]: e["scope"] for e in payload["approved_facts"] + (self.facts or {}).get("entries", [])}
+        offer_ids = offers_for(evidence.get("ask_format"), [cid for cid in evidence.get("selected_claim_ids") or [] if cid in phrase and scopes.get(cid) == "offer"])
+        used = [cid for cid in BASE_CLAIMS if cid in phrase and scopes.get(cid) != "offer"] + offer_ids
         detail = evidence.get("email_detail") or " ".join(evidence["supporting_excerpt"].split()[:16]).rstrip(".")
         opening = evidence.get("mock_opening") or f"Your article ({evidence['article_url']}) notes: {detail}. {evidence['drex_connection']}"
-        para2 = f"I'm {sender} from Nace AI, working on Drex Max, a multimodal decision model for browser-use agents making decisions from screenshots."
-        para3 = evidence["suggested_ask"] + " We can offer API credits and answer technical questions."
+        product = ", ".join(phrase[cid] for cid in ("product.model", "product.agents") if cid in phrase)
+        para2 = f"I'm {sender} from Nace AI" + (f", working on {product}." if product else ".")
+        offers = [phrase[cid] for cid in offer_ids]
+        para3 = evidence["suggested_ask"] + (" We can offer " + " and ".join(offers) + "." if offers else "")
         body = "\n\n".join([f"Hi {first}," if first else "Hello,", opening, para2, para3,
                             "Explore Drex: https://nace.ai/developers", f"Best,\n{sender}"])
-        return {"subject": evidence.get("mock_subject") or "Your article and Drex Max", "plain_text_body": body,
-                "email_detail": detail, "claim_ids_used": list(BASE_CLAIMS)}
+        return {"subject": evidence.get("mock_subject") or "Your article and Nace AI", "plain_text_body": body,
+                "email_detail": detail, "claim_ids_used": used}
+
+
+LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
+
+
+def check_local_base_url(value):
+    u = urlsplit(str(value or ""))
+    if u.scheme not in ("http", "https") or u.hostname not in LOOPBACK_HOSTS or u.username or u.password or u.query or u.fragment:
+        raise ValueError("local_base_url must be a loopback URL such as http://127.0.0.1:11434")
+    return str(value).rstrip("/")
+
+
+def check_output(draft):
+    if not isinstance(draft, dict) or set(draft) != set(SCHEMA["required"]) or not all(isinstance(draft[k], str) for k in ("subject", "plain_text_body", "email_detail")) \
+            or not isinstance(draft["claim_ids_used"], list) or not all(isinstance(c, str) for c in draft["claim_ids_used"]):
+        raise ValueError("Model output did not match the expected schema")
+    return draft
+
+
+def live_preconditions(payload):
+    ids = {e["id"] for e in payload["approved_facts"]}
+    if not set(BASE_CLAIMS).issubset(ids):
+        raise ValueError("Approve the relevant product, use-case, API-credit, technical-answer and developer-link entries before live writing")
+    if not payload["recipient"]["first_name"]:
+        raise ValueError("Live writing requires a confirmed public first name; use a manually reviewed neutral greeting otherwise")
+
+
+class LocalWriter:
+    """OpenAI-compatible chat endpoint on this machine (Ollama /v1/chat/completions). No key, no pricing."""
+    name = "local"
+
+    def __init__(self, store, config, run):
+        self.store, self.config, self.run = store, config, run
+        self.base = check_local_base_url(config.get("local_base_url"))
+        if not config["model"]:
+            raise ValueError("Set model in the local config to a model pulled into the local server (for example with ollama pull)")
+
+    def generate(self, payload, evidence, revision=None):
+        live_preconditions(payload)
+        messages = [{"role": "system", "content": INSTRUCTIONS}, {"role": "user", "content": dumps(payload)}]
+        if revision:
+            messages.append({"role": "user", "content": dumps({"revision_request": revision})})
+        data = {"model": self.config["model"], "messages": messages, "stream": False,
+                "max_tokens": self.config["max_output_tokens"],
+                "response_format": {"type": "json_schema", "json_schema": {"name": "outreach_email", "strict": True, "schema": SCHEMA}}}
+        key = "local:v2:" + digest([self.base, data])
+        cached = self.store.db.execute("SELECT data FROM cache WHERE key=?", (key,)).fetchone()
+        if cached:
+            return json.loads(cached[0])
+        body = dumps(data).encode("utf-8")
+        # No proxy: the request and the evidence it carries never leave this machine.
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+        for attempt in range(self.config["max_retries"] + 1):
+            self.run.request(0)
+            try:
+                request = urllib.request.Request(self.base + "/v1/chat/completions", data=body, headers={"Content-Type": "application/json"})
+                with opener.open(request, timeout=300) as response:
+                    raw = response.read(2_000_001)
+                if len(raw) > 2_000_000:
+                    raise ValueError("Model response exceeded response limit")
+                result = json.loads(raw)
+                usage = result.get("usage") or {}
+                self.run.usage.append({"provider": "local", "model": result.get("model"), "request_id": result.get("id"),
+                                       "usage": {"input_tokens": usage.get("prompt_tokens"), "output_tokens": usage.get("completion_tokens")},
+                                       "actual_cost_usd": None, "cost_basis": "Local model; no provider billing"})
+                self.run.flush()
+                choice = (result.get("choices") or [{}])[0]
+                if choice.get("finish_reason") not in ("stop", None):
+                    raise ValueError("Local model response incomplete (" + str(choice.get("finish_reason")) + "); human review required")
+                content = (choice.get("message") or {}).get("content")
+                if not content:
+                    raise ValueError("Local model returned no draft")
+                try:
+                    draft = check_output(json.loads(content))
+                except json.JSONDecodeError:
+                    raise ValueError("Model output did not match the expected schema") from None
+                self.store.db.execute("INSERT OR REPLACE INTO cache VALUES(?,?,?)", (key, dumps(draft), now()))
+                self.store.db.commit()
+                return draft
+            except urllib.error.HTTPError as exc:
+                if exc.code not in (500, 502, 503, 504) or attempt == self.config["max_retries"]:
+                    raise ValueError(f"Local model server HTTP {exc.code}; check that model {self.config['model']!r} is pulled") from None
+            except (urllib.error.URLError, TimeoutError, ConnectionError):
+                if attempt == self.config["max_retries"]:
+                    raise ValueError(f"Local model server unavailable at {self.base}; start it (ollama serve) and retry") from None
+            time.sleep(min(2 ** attempt, 4))
+        raise ValueError("Local model server unavailable")
 
 
 class OpenAIWriter:
@@ -62,11 +173,7 @@ class OpenAIWriter:
                 raise ValueError("Set current provider pricing for input and output to enforce the budget")
 
     def generate(self, payload, evidence, revision=None):
-        ids = {e["id"] for e in payload["approved_facts"]}
-        if not set(BASE_CLAIMS).issubset(ids):
-            raise ValueError("Approve the relevant product, use-case, API-credit, technical-answer and developer-link entries before live writing")
-        if not payload["recipient"]["first_name"]:
-            raise ValueError("Live writing requires a confirmed public first name; use a manually reviewed neutral greeting otherwise")
+        live_preconditions(payload)
         data = {"model": self.config["model"], "store": False, "instructions": INSTRUCTIONS,
                 "input": [{"role": "user", "content": dumps(payload)}],
                 "max_output_tokens": self.config["max_output_tokens"],
@@ -104,9 +211,7 @@ class OpenAIWriter:
                 chunks = [c["text"] for o in result.get("output", []) if o.get("type") == "message" for c in o.get("content", []) if c.get("type") == "output_text"]
                 if not chunks:
                     raise ValueError("Model returned no draft (possibly a refusal)")
-                draft = json.loads("".join(chunks))
-                if set(draft) != set(SCHEMA["required"]) or not all(isinstance(draft[k], str) for k in ("subject", "plain_text_body", "email_detail")) or not isinstance(draft["claim_ids_used"], list):
-                    raise ValueError("Model output did not match the expected schema")
+                draft = check_output(json.loads("".join(chunks)))
                 self.store.db.execute("INSERT OR REPLACE INTO cache VALUES(?,?,?)", (key, dumps(draft), now()))
                 self.store.db.commit()
                 return draft

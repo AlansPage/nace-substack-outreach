@@ -1,0 +1,11 @@
+{
+  "id": "chatcmpl-fixture",
+  "object": "chat.completion",
+  "created": 1792400000,
+  "model": "fixture-model:latest",
+  "system_fingerprint": "fp_ollama",
+  "choices": [
+    {"index": 0, "message": {"role": "assistant", "content": "__DRAFT_JSON__"}, "finish_reason": "stop"}
+  ],
+  "usage": {"prompt_tokens": 812, "completion_tokens": 164, "total_tokens": 976}
+}

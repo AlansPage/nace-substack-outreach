@@ -54,13 +54,16 @@ def serve(config, port=8765):
                     facts, _ = pipeline.facts()
                     return self.send({"token": token, "statuses": STATUSES, "fits": FITS, "asks": ASKS,
                                       "provider": config["provider"], "sender": config["sender"], "facts": facts,
-                                      "network_enabled": config["network_enabled"], "batch_size": config["batch_size"]})
+                                      "network_enabled": config["network_enabled"], "batch_size": config["batch_size"],
+                                      "collect_contacts": config["collect_contacts"]})
                 if u.path == "/api/substack/queue":
                     return self.send(pipeline.queue(query.get("scope", "pilot"), query.get("search", ""), query.get("status", ""), int(query.get("limit", 100)), int(query.get("offset", 0))))
                 if u.path == "/api/substack/metrics":
                     return self.send(pipeline.store.metrics())
                 if u.path == "/api/substack/export":
                     fmt = query.get("format", "json")
+                    if fmt not in ("csv", "json"):
+                        raise ValueError("The worker exports csv or json; build the send sheet with the CLI")
                     return self.send(pipeline.export(fmt, query.get("scope", "pilot")), content_type="text/csv; charset=utf-8" if fmt == "csv" else "application/json; charset=utf-8")
                 if u.path.startswith("/api/substack/publication/"):
                     pub = pipeline.detail(int(u.path.rsplit("/", 1)[1]))
@@ -83,6 +86,8 @@ def serve(config, port=8765):
                     raise ValueError("Expected JSON body, maximum 250 KB")
                 data = json.loads(self.rfile.read(size))
                 parts = urlsplit(self.path).path.strip("/").split("/")
+                if parts == ["api", "substack", "collect-contacts"]:
+                    return self.send({"results": pipeline.collect_contacts(max(0, int(data.get("batch") or 0)) or None, bool(data.get("retry_failed")))})
                 if len(parts) != 5 or parts[:3] != ["api", "substack", "publication"]:
                     return self.send({"error": "Unknown action"}, 404)
                 return self.send(pipeline.action(int(parts[3]), parts[4], data))

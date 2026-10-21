@@ -1,0 +1,43 @@
+{
+  "version": 1,
+  "note": "Seed do-not-contact list for publications owned by model vendors. Copy to substack_outreach/dnc.json (gitignored) and edit there. Matching is exact and case-insensitive: hosts compare the publication URL host without www., author_names and names compare the whole workbook value, pub_ids compare the workbook pub_id. A personal newsletter by a vendor employee is not vendor-owned and is not listed here.",
+  "entries": [
+    {
+      "owner": "OpenAI",
+      "hosts": ["openaiglobalaffairs.substack.com"],
+      "author_names": ["OpenAI", "OpenAI Global Affairs"],
+      "reason": "Vendor-owned publication",
+      "source": "substack-technology.xlsx row: author_name 'OpenAI Global Affairs', title 'The Prompt: Insights from OpenAI Global Affairs'"
+    },
+    {
+      "owner": "Anthropic",
+      "author_names": ["Anthropic"],
+      "reason": "Vendor-owned publication",
+      "source": "Seed: exact official account name; no matching row in the Technology workbook"
+    },
+    {
+      "owner": "Google",
+      "author_names": ["Google", "Google DeepMind", "DeepMind", "Google AI", "Google Cloud"],
+      "reason": "Vendor-owned publication",
+      "source": "Seed: exact official account names; no matching row in the Technology workbook"
+    },
+    {
+      "owner": "Microsoft",
+      "author_names": ["Microsoft", "Microsoft AI", "Microsoft Research"],
+      "reason": "Vendor-owned publication",
+      "source": "Seed: exact official account names; no matching row in the Technology workbook"
+    },
+    {
+      "owner": "Meta",
+      "author_names": ["Meta", "Meta AI"],
+      "reason": "Vendor-owned publication",
+      "source": "Seed: exact official account names; no matching row in the Technology workbook"
+    },
+    {
+      "owner": "Other model vendors",
+      "author_names": ["xAI", "Mistral AI", "Cohere", "NVIDIA", "Amazon Web Services", "AWS", "Hugging Face", "Perplexity"],
+      "reason": "Vendor-owned publication",
+      "source": "Seed: exact official account names; no matching row in the Technology workbook"
+    }
+  ]
+}

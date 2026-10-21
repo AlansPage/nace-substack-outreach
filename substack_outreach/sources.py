@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import re
 import socket
 import time
 import urllib.error
@@ -18,6 +19,23 @@ from .common import canonical, digest, dumps, now, publication_url, safe_url
 USER_AGENT = "NaceResearchLocal/1.0"
 MAX_BYTES = 2_000_000
 MAX_TEXT = 16_000
+DEFAULT_PERMISSION_KEYS = ("permission_basis", "permission_source_url", "permission_review_date")
+
+
+def check_default_permission(value):
+    """default_feed_permission is a human policy decision: validate its shape, never fill it in."""
+    if value is None:
+        return
+    if not isinstance(value, dict) or set(value) != set(DEFAULT_PERMISSION_KEYS):
+        raise ValueError("default_feed_permission must be null or an object with exactly: " + ", ".join(DEFAULT_PERMISSION_KEYS))
+    if not isinstance(value["permission_basis"], str) or len(value["permission_basis"].strip()) < 10:
+        raise ValueError("default_feed_permission.permission_basis must explain the documented permission")
+    if not str(value["permission_source_url"]).startswith("https://") or not safe_url(value["permission_source_url"]):
+        raise ValueError("default_feed_permission.permission_source_url must be an HTTPS URL")
+    try:
+        datetime.strptime(str(value["permission_review_date"]), "%Y-%m-%d")
+    except ValueError:
+        raise ValueError("default_feed_permission.permission_review_date must be YYYY-MM-DD") from None
 
 
 class TextParser(HTMLParser):
@@ -43,6 +61,79 @@ class TextParser(HTMLParser):
     def handle_data(self, text):
         if not self.hidden:
             self.parts.append(text)
+
+
+class ContactParser(HTMLParser):
+    """Visible text and link targets of one page; scripts, styles and embedded JSON are ignored."""
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.parts, self.hrefs, self.hidden = [], [], 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag in ("script", "style", "noscript", "template"):
+            self.hidden += 1
+        elif tag == "a" and not self.hidden:
+            href = dict(attrs).get("href")
+            if href:
+                self.hrefs.append(href.strip())
+
+    def handle_endtag(self, tag):
+        if tag in ("script", "style", "noscript", "template"):
+            self.hidden = max(0, self.hidden - 1)
+
+    def handle_data(self, text):
+        if not self.hidden:
+            self.parts.append(text)
+
+
+EMAIL = re.compile(r"(?<![\w.+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}(?![\w-])")
+SOCIAL = {"x.com": "x", "twitter.com": "x", "linkedin.com": "linkedin"}
+NOT_PROFILES = {"intent", "share", "home", "i", "search", "hashtag", "sharing", "shareArticle", "feed"}
+PLATFORM_HOSTS = ("substack.com", "substackcdn.com", "facebook.com", "instagram.com", "youtube.com", "youtu.be",
+                  "tiktok.com", "apple.com", "spotify.com", "google.com", "bsky.app", "threads.net")
+MAX_CONTACT_CANDIDATES = 10
+
+
+def extract_contacts(page, page_url):
+    """Contact candidates from an about page: mailto links, visible addresses, X/LinkedIn and personal sites.
+
+    Every candidate is a proposal for human review; nothing here confirms a route or an identity.
+    """
+    parser = ContactParser()
+    parser.feed(page or "")
+    own = (urlsplit(page_url).hostname or "").removeprefix("www.")
+    found, seen = [], set()
+
+    def add(route, kind, found_as):
+        key = route.lower()
+        if route and key not in seen and len(found) < MAX_CONTACT_CANDIDATES:
+            seen.add(key)
+            found.append({"route": route, "type": kind, "found_as": found_as})
+
+    for href in parser.hrefs:
+        if href.lower().startswith("mailto:"):
+            address = href[7:].split("?")[0].strip()
+            if EMAIL.fullmatch(address):
+                add(address, "email", "mailto link")
+    for address in EMAIL.findall(" ".join(parser.parts)):
+        add(address, "email", "visible text")
+    for href in parser.hrefs:
+        url = safe_url(urljoin(page_url, href))
+        u = urlsplit(url)
+        host = (u.hostname or "").removeprefix("www.")
+        if not url or u.scheme != "https" or not host or host == own:
+            continue
+        segments = [s for s in u.path.split("/") if s]
+        base = next((s for s in SOCIAL if host == s or host.endswith("." + s)), None)
+        if base == "linkedin.com":
+            if len(segments) >= 2 and segments[0] in ("in", "company"):
+                add(canonical(url), "linkedin", "link")
+        elif base:
+            if len(segments) == 1 and segments[0] not in NOT_PROFILES:
+                add(canonical(url), "x", "link")
+        elif not any(host == p or host.endswith("." + p) for p in PLATFORM_HOSTS):
+            add(canonical(url), "site", "link")
+    return found
 
 
 def strip_html(text):
@@ -157,9 +248,15 @@ class Collector:
         self.memory = {}
 
     def permission(self, pub):
-        p = pub.get("research", {})
+        p = pub.get("research") or {}
         if not self.config["network_enabled"]:
             raise ValueError("NETWORK_DISABLED: import supplied research or explicitly enable permitted RSS collection")
+        default = self.config.get("default_feed_permission")
+        # A team-set default covers workbook Substack publications (pub_id) with a resolved URL and no
+        # explicit research block. An explicit block, even an incomplete one, always takes precedence.
+        if not p and default and (pub.get("source") or {}).get("pub_id") and publication_url(pub.get("publication_url")):
+            p = {"source_kind": "publisher_rss", "automated_use_permitted": True,
+                 **{k: default[k] for k in DEFAULT_PERMISSION_KEYS}}
         if not p.get("automated_use_permitted") or p.get("source_kind") != "publisher_rss" or not p.get("permission_basis") or not safe_url(p.get("permission_source_url")):
             raise ValueError("SOURCE_PERMISSION_REQUIRED: record publisher permission/terms and source URL first")
         expiry = p.get("permission_review_date")
@@ -222,6 +319,19 @@ class Collector:
             raise ValueError("Publisher crawl delay exceeds local worker bound; use a supplied export")
         time.sleep(max(0, delay - (time.monotonic() - self.last_request)))
         return self.get(url, host)
+
+    def about_contacts(self, pub):
+        if not self.config.get("collect_contacts"):
+            raise ValueError("CONTACT_COLLECTION_DISABLED: set collect_contacts: true in the local config")
+        if not self.config["network_enabled"]:
+            raise ValueError("NETWORK_DISABLED: enable network access to read publication about pages")
+        root = publication_url(pub.get("publication_url"))
+        if not root:
+            raise ValueError("PUBLICATION_URL_UNRESOLVED")
+        about = root + "/about"
+        # Same robots check, rate limit, redirect refusal, 2 MB cap and same-host rule as feed collection.
+        page = self.allowed_get(about, urlsplit(root).hostname).decode("utf-8")
+        return about, extract_contacts(page, about)
 
     def collect(self, pub):
         permission = self.permission(pub)
