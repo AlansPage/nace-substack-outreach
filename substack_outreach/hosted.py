@@ -86,8 +86,7 @@ def handle(environ, method, raw_path, headers, read_body):
     if method != "POST":
         return response({"error": "Method not allowed"}, 405)
     # Same-origin page, with the token bound to this session cookie.
-    if headers.get("Origin") != settings.app_origin or headers.get("Sec-Fetch-Site") == "cross-site" \
-            or headers.get("X-Local-Token") != auth.csrf_token(settings, cookie):
+    if not same_origin(settings, headers) or headers.get("X-Local-Token") != auth.csrf_token(settings, cookie):
         return response({"error": "Same-origin request with the session token required"}, 403)
     try:
         size = int(headers.get("Content-Length") or 0)
@@ -98,11 +97,23 @@ def handle(environ, method, raw_path, headers, read_body):
     return with_pipeline(environ, user, lambda pipeline, config: post_route(pipeline, path, raw, content_type))
 
 
+def same_origin(settings, headers):
+    """Was this request sent by a page of this site? Browsers send `Origin: null` on form posts from a page
+    whose Referrer-Policy is no-referrer, so a null or absent origin counts only when the browser itself
+    marks the request same-origin (Sec-Fetch-Site)."""
+    origin, site = headers.get("Origin"), headers.get("Sec-Fetch-Site")
+    if site in ("cross-site", "same-site"):
+        return False
+    if origin in (settings.app_origin, "https://" + (headers.get("Host") or "")):
+        return True
+    return origin in (None, "null") and site in ("same-origin", None)
+
+
 def team_login(settings, method, headers, read_body):
     if method != "POST":
         return response(auth.login_page(), 200, HTML)
     # A form post from this site only; a slow wrong answer keeps password guessing slow.
-    if headers.get("Origin") not in (settings.app_origin, None) or headers.get("Sec-Fetch-Site") == "cross-site":
+    if not same_origin(settings, headers):
         return response({"error": "Sign in from the workspace page"}, 403)
     try:
         size = int(headers.get("Content-Length") or 0)
