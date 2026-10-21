@@ -24,6 +24,7 @@ def offers_for(ask_format, offer_ids):
 
 
 REGISTRY_IN_DATABASE = "database"
+EXAMPLE_REGISTRY = Path(__file__).with_name("facts.example.json")
 
 
 def check_registry(data):
@@ -55,9 +56,9 @@ def push_registry(store, data, pushed_by):
 def registry(store, path):
     if path == REGISTRY_IN_DATABASE:
         row = store.db.execute("SELECT data FROM facts_registry ORDER BY pushed_at DESC, version DESC LIMIT 1").fetchone()
-        if row is None:
-            raise ValueError("No facts registry in the database yet; run facts-push with your facts.json")
-        data = json.loads(row["data"])
+        # Until someone runs facts-push, the shared workspace uses the committed placeholder registry: every entry
+        # is pending, so drafts stay previews and nothing can be approved, but claiming and tracking work.
+        data = json.loads(row["data"]) if row else json.loads(EXAMPLE_REGISTRY.read_text(encoding="utf-8"))
     else:
         data = json.loads(Path(path).read_text(encoding="utf-8-sig"))
     check_registry(data)
