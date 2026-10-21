@@ -32,6 +32,8 @@ class AuthSettings:
     app_origin: str
     allowed_domain: str = ""
     allowed_emails: frozenset = frozenset()
+    # Team-password mode: one shared password, each person types their name. No Google setup needed.
+    team_password: str = ""
 
     @property
     def redirect_uri(self):
@@ -39,10 +41,13 @@ class AuthSettings:
 
     @classmethod
     def from_env(cls, environ):
-        names = ("GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "SESSION_SECRET", "APP_ORIGIN")
+        password = environ.get("TEAM_PASSWORD", "")
+        names = ("SESSION_SECRET", "APP_ORIGIN") if password else ("GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "SESSION_SECRET", "APP_ORIGIN")
         missing = [n for n in names if not environ.get(n)]
         if missing:
             raise ValueError("Missing environment variables: " + ", ".join(missing))
+        if password and len(password) < 12:
+            raise ValueError("TEAM_PASSWORD must be at least 12 characters")
         if len(environ["SESSION_SECRET"]) < 32:
             raise ValueError("SESSION_SECRET must be at least 32 characters")
         origin = environ["APP_ORIGIN"].rstrip("/")
@@ -50,8 +55,8 @@ class AuthSettings:
         if parts.scheme != "https" or not parts.hostname or parts.path or parts.query:
             raise ValueError("APP_ORIGIN must be the https origin of the deployment, e.g. https://outreach.example.vercel.app")
         emails = frozenset(e.strip().lower() for e in environ.get("ALLOWED_EMAILS", "").split(",") if e.strip())
-        return cls(environ["GOOGLE_CLIENT_ID"], environ["GOOGLE_CLIENT_SECRET"], environ["SESSION_SECRET"], origin,
-                   environ.get("ALLOWED_EMAIL_DOMAIN", "").strip().lower(), emails)
+        return cls(environ.get("GOOGLE_CLIENT_ID", ""), environ.get("GOOGLE_CLIENT_SECRET", ""), environ["SESSION_SECRET"], origin,
+                   environ.get("ALLOWED_EMAIL_DOMAIN", "").strip().lower(), emails, password)
 
 
 def b64(data):
@@ -152,3 +157,33 @@ def csrf_token(settings, cookie_header):
     """Mutation token bound to this session cookie; sent by the UI in X-Local-Token."""
     session = cookies(cookie_header).get(SESSION_COOKIE, "")
     return b64(hmac.new(settings.session_secret.encode("utf-8"), ("csrf:" + session).encode("utf-8"), hashlib.sha256).digest())
+
+
+def check_team_login(settings, name, password):
+    """Team-password sign-in -> session user. The name is how teammates see each other; it is not verified."""
+    name = " ".join(str(name or "").split())
+    if not 1 <= len(name) <= 40 or any(c in name for c in "<>\"'`"):
+        raise ValueError("Enter your name (up to 40 characters).")
+    if not settings.team_password or not hmac.compare_digest(str(password or "").encode(), settings.team_password.encode()):
+        raise ValueError("That team password is not right.")
+    return {"sub": "team:" + name.casefold(), "email": name}
+
+
+def login_page(error="", name=""):
+    """The team-password sign-in form, plain HTML with no script."""
+    from html import escape
+    message = f'<p class="err" role="alert">{escape(error)}</p>' if error else ""
+    return f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow"><title>Sign in - Substack outreach</title><style>
+:root{{color-scheme:light dark;--bg:#f4f7f5;--card:#fff;--fg:#1d3029;--muted:#5d6d64;--line:#cbd7d0;--accent:#236a53;--err:#9b2c22}}
+@media (prefers-color-scheme:dark){{:root{{--bg:#121815;--card:#1a221e;--fg:#e5ece8;--muted:#9aaba3;--line:#33403a;--accent:#5cc2ab;--err:#f19a90}}}}
+body{{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,"Segoe UI",sans-serif;display:grid;place-items:center;min-height:100vh;padding:16px;box-sizing:border-box}}
+form{{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:28px;display:grid;gap:14px;width:100%;max-width:360px}}
+h1{{margin:0;font-size:22px}} p{{margin:0;color:var(--muted);font-size:13px}} .err{{color:var(--err)}}
+label{{display:grid;gap:6px;font-size:13px;font-weight:600}} input{{font:inherit;padding:9px 10px;border:1px solid var(--line);border-radius:7px;background:var(--bg);color:var(--fg)}}
+button{{font:inherit;font-weight:600;padding:10px;border:0;border-radius:7px;background:var(--accent);color:#fff;cursor:pointer}}
+</style></head><body><form method="post" action="/api/auth/login"><h1>Substack outreach</h1>
+<p>Sign in with your name and the team password. Your name is shown to teammates on everything you claim.</p>{message}
+<label>Your name<input name="name" autocomplete="name" required maxlength="40" value="{escape(name)}"></label>
+<label>Team password<input name="password" type="password" autocomplete="current-password" required></label>
+<button type="submit">Sign in</button></form></body></html>"""

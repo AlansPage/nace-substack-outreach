@@ -27,7 +27,7 @@
   const userHTML = user => user ? `<span class="ss-chip">Signed in as ${esc(user.email)} · <a href="/api/auth/logout">Sign out</a></span>` : '';
   // Shared "already contacted" marker: shown in the list and on the writer's panel for every teammate.
   const contactedHTML = c => c ? `<span class="ss-contacted">✓ ${esc(c.event || 'Contacted')} · ${esc(c.channel)} · ${esc(c.actor || 'not recorded who')} · ${esc(String(c.at || '').slice(0, 10))}</span>` : '';
-  const signInHTML = () => 'Sign in to open the shared workspace. <a href="/api/auth/login">Sign in with Google</a>';
+  const signInHTML = () => 'Sign in to open the shared workspace. <a href="/api/auth/login">Sign in</a>';
   // Upload: accept the all-sheets JSON export, {headers, rows}, or a plain array of rows. Only tables with
   // url/pub_id columns are Substack publications; the rest are reported as skipped. Batches stay well under
   // the 4.5 MB request cap.
